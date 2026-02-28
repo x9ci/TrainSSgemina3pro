@@ -1,4 +1,4 @@
-print(f"✨ الرواية جاهزة للقراءة - نص نظيف خالٍ من أي محتوى أجنبي!")#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 نظام الترجمة الشامل عالي الجودة المحسن - النسخة المطورة
@@ -21,6 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 import re
 import sqlite3
+import contextlib
 from pathlib import Path
 import hashlib
 import traceback
@@ -262,7 +263,7 @@ class EnhancedGeminiAPI:
             del self.blocked_keys[key]
             logger.info(f"تم إلغاء حظر المفتاح: {key[:10]}...")
     
-    def get_optimal_api_key(self) -> Optional[str]:
+    async def get_optimal_api_key(self) -> Optional[str]:
         """الحصول على أفضل مفتاح API بناءً على الصحة والأداء"""
         self._unblock_keys()
         
@@ -294,14 +295,14 @@ class EnhancedGeminiAPI:
             
             if min_wait < float('inf') and min_wait > 0:
                 logger.warning(f"جميع المفاتيح مشغولة، انتظار {min_wait:.1f} ثانية...")
-                time.sleep(min_wait + 0.5)
-                return self.get_optimal_api_key()
+                await asyncio.sleep(min_wait + 0.5)
+                return await self.get_optimal_api_key()
             
             # إذا فشلت كل المحاولات، أعد تعيين المفاتيح المحظورة
             logger.warning("جميع المفاتيح مشغولة، انتظار...")
-            time.sleep(15)
+            await asyncio.sleep(15)
             self.blocked_keys.clear()
-            return self.get_optimal_api_key()
+            return await self.get_optimal_api_key()
         
         # اختيار المفتاح الأفضل صحة وأقل استخداماً
         available_keys.sort(key=lambda x: (x[1], -self.key_stats[x[0]].total_requests), reverse=True)
@@ -318,7 +319,7 @@ class EnhancedGeminiAPI:
         await self._ensure_session()
         
         for attempt in range(self.max_retries):
-            api_key = self.get_optimal_api_key()
+            api_key = await self.get_optimal_api_key()
             if not api_key:
                 logger.error("لا توجد مفاتيح API متاحة")
                 return None
@@ -565,7 +566,7 @@ class ComprehensiveContentProcessor:
     
     @staticmethod
     def has_any_foreign_content(text: str) -> bool:
-        """التحقق من وجود أي محتوى أجنبي"""
+        """التحقق من وجود أي محتوى أجنبي (باستثناء الأرقام التي يمكن تحويلها)"""
         english_pattern = r'\b[A-Za-z]{2,}\b'
         remaining_english = re.findall(english_pattern, text)
         
@@ -576,10 +577,8 @@ class ComprehensiveContentProcessor:
             if word.upper() not in acceptable_english:
                 return True
         
-        # التحقق من الأرقام الإنجليزية
-        english_numbers = re.findall(r'\d', text)
-        if english_numbers:
-            return True
+        # لا نعتبر الأرقام الإنجليزية كمحتوى أجنبي يستوجب إعادة الترجمة
+        # لأن دالة convert_numbers_to_arabic ستقوم بتحويلها لاحقاً.
         
         return False
 
@@ -1535,121 +1534,118 @@ class MasterTranslationSystem:
     def init_advanced_database(self):
         """إنشاء قاعدة بيانات متقدمة"""
         
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # جدول الفصول مع معلومات مفصلة
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS chapters (
-                id TEXT PRIMARY KEY,
-                title TEXT,
-                original_content TEXT,
-                translated_content TEXT,
-                word_count INTEGER,
-                character_count INTEGER,
-                genre TEXT DEFAULT 'prose',
-                tone TEXT DEFAULT 'neutral',
-                status TEXT DEFAULT 'pending',
-                translation_attempts INTEGER DEFAULT 0,
-                quality_score REAL DEFAULT 0.0,
-                translation_time REAL DEFAULT 0.0,
-                foreign_content_detected BOOLEAN DEFAULT 0,
-                corrections_applied INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # جدول المصطلحات المتقدم
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS terminology (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                original_term TEXT UNIQUE,
-                translated_term TEXT,
-                category TEXT,
-                frequency INTEGER DEFAULT 1,
-                confidence_score REAL DEFAULT 1.0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # جدول السجلات المفصل
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS translation_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chapter_id TEXT,
-                operation TEXT,
-                status TEXT,
-                message TEXT,
-                duration REAL,
-                api_key_used TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
+
+            # جدول الفصول مع معلومات مفصلة
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS chapters (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    original_content TEXT,
+                    translated_content TEXT,
+                    word_count INTEGER,
+                    character_count INTEGER,
+                    genre TEXT DEFAULT 'prose',
+                    tone TEXT DEFAULT 'neutral',
+                    status TEXT DEFAULT 'pending',
+                    translation_attempts INTEGER DEFAULT 0,
+                    quality_score REAL DEFAULT 0.0,
+                    translation_time REAL DEFAULT 0.0,
+                    foreign_content_detected BOOLEAN DEFAULT 0,
+                    corrections_applied INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # جدول المصطلحات المتقدم
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS terminology (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_term TEXT UNIQUE,
+                    translated_term TEXT,
+                    category TEXT,
+                    frequency INTEGER DEFAULT 1,
+                    confidence_score REAL DEFAULT 1.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # جدول السجلات المفصل
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS translation_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chapter_id TEXT,
+                    operation TEXT,
+                    status TEXT,
+                    message TEXT,
+                    duration REAL,
+                    api_key_used TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            conn.commit()
+
         logger.info("تم إنشاء قاعدة البيانات المتقدمة")
     
     def save_chapter_advanced(self, chapter_data: Dict[str, Any]):
         """حفظ متقدم للفصل مع جميع البيانات"""
         
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO chapters 
-            (id, title, original_content, translated_content, word_count, character_count,
-             genre, tone, status, translation_attempts, quality_score, translation_time, 
-             foreign_content_detected, corrections_applied, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            chapter_data['id'],
-            chapter_data['title'],
-            chapter_data.get('original_content', ''),
-            chapter_data.get('translated_content', ''),
-            chapter_data.get('word_count', 0),
-            chapter_data.get('character_count', 0),
-            chapter_data.get('genre', 'prose'),
-            chapter_data.get('tone', 'neutral'),
-            chapter_data.get('status', 'pending'),
-            chapter_data.get('translation_attempts', 0),
-            chapter_data.get('quality_score', 0.0),
-            chapter_data.get('translation_time', 0.0),
-            chapter_data.get('foreign_content_detected', False),
-            chapter_data.get('corrections_applied', 0),
-            datetime.now().isoformat()
-        ))
-        
-        conn.commit()
-        conn.close()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                INSERT OR REPLACE INTO chapters
+                (id, title, original_content, translated_content, word_count, character_count,
+                 genre, tone, status, translation_attempts, quality_score, translation_time,
+                 foreign_content_detected, corrections_applied, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                chapter_data['id'],
+                chapter_data['title'],
+                chapter_data.get('original_content', ''),
+                chapter_data.get('translated_content', ''),
+                chapter_data.get('word_count', 0),
+                chapter_data.get('character_count', 0),
+                chapter_data.get('genre', 'prose'),
+                chapter_data.get('tone', 'neutral'),
+                chapter_data.get('status', 'pending'),
+                chapter_data.get('translation_attempts', 0),
+                chapter_data.get('quality_score', 0.0),
+                chapter_data.get('translation_time', 0.0),
+                chapter_data.get('foreign_content_detected', False),
+                chapter_data.get('corrections_applied', 0),
+                datetime.now().isoformat()
+            ))
+
+            conn.commit()
     
     def log_operation(self, chapter_id: str, operation: str, status: str, 
                      message: str, duration: float = 0.0, api_key: str = ""):
         """تسجيل العمليات في السجل"""
         
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO translation_logs 
-            (chapter_id, operation, status, message, duration, api_key_used)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (chapter_id, operation, status, message, duration, api_key[:10]))
-        
-        conn.commit()
-        conn.close()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                INSERT INTO translation_logs
+                (chapter_id, operation, status, message, duration, api_key_used)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (chapter_id, operation, status, message, duration, api_key[:10]))
+
+            conn.commit()
 
     def _load_completed_chapters_from_db(self) -> Dict[str, Any]:
         """تحميل الفصول المكتملة مسبقاً من قاعدة البيانات"""
         logger.info("فحص قاعدة البيانات عن فصول مترجمة مسبقاً...")
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
 
-        try:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
             cursor.execute("SELECT * FROM chapters WHERE status = 'completed'")
             completed_chapters = {}
             rows = cursor.fetchall()
@@ -1663,8 +1659,6 @@ class MasterTranslationSystem:
                 logger.info("لم يتم العثور على فصول مترجمة مسبقاً.")
             
             return completed_chapters
-        finally:
-            conn.close()
 
     async def translate_chapter_comprehensively(self, chapter: Dict[str, Any]) -> Dict[str, Any]:
         """ترجمة شاملة للفصل مع ضمانات الجودة المحسنة"""
@@ -2067,12 +2061,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 تم إنهاء البرنامج")
-    except Exception as e:
-        print(f"خطأ غير متوقع على المستوى الأعلى: {str(e)}")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
