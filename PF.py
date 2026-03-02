@@ -231,15 +231,6 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyC-5FS_Lk6Hv0kgc5iypa60c5gN-u-dsL0",
-            "AIzaSyAIwqqpiSD3laMLbouTSSRzy4ax3-7B4wk",
-            "AIzaSyDyhShDlqanEcy8PQyYa5vhUEdG__N8Vuw",
-            "AIzaSyBc1XvpeKl7qLbXGxANEJ1y_-IRh8TXOS0",
-            "AIzaSyAJjhudGlJRpDirRREx0rV8RHdwBuHaaEg",
-            "AIzaSyCgnAaiIiT0CCMJMXBkDYOaSbSdu7VCzx0",
-            "AIzaSyDXHRTVI1IzgNOFiiIaN7PwwBgZFLvW7l8",
-            "AIzaSyAeKu-sgVBKzhjZmfe4oVDKPeZM7kpC_M0",
-            "AIzaSyAQT8k-L4D9UGZDTdLPgMZSn27yVoBVNgI",
 
         ]
         
