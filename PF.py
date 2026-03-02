@@ -87,9 +87,119 @@ def setup_comprehensive_logging():
 
 logger, quality_logger = setup_comprehensive_logging()
 
-# ============= تحسين 2: نظام Rate Limiting محسن =============
+# ============= تحسين 2: نظام Rate Limiting وحساب Tokens محسن =============
+
+class TokenEstimator:
+    """أداة لتقدير عدد الـ Tokens في النص لتجنب تجاوز حد 32K TPM"""
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """
+        تقدير عدد الـ Tokens بناءً على طول النص.
+        قاعدة عامة لـ Gemini:
+        - الإنجليزية: 1 token ≈ 4 characters
+        - العربية: 1 token ≈ 2.5 characters (لأن الأحرف العربية تستهلك tokens أكثر)
+        سنستخدم تقديراً متحفظاً (آمناً): 1 token لكل حرفين لضمان عدم تجاوز الحد.
+        """
+        if not text:
+            return 0
+
+        # إضافة هامش أمان (Safety margin) للـ system instructions والـ prompt wrapper
+        base_tokens = 50
+
+        # نقدر أن كل حرفين يمثلان Token واحد لضمان الأمان الأقصى مع النصوص العربية
+        text_tokens = len(text) // 2
+
+        return base_tokens + text_tokens
+
+class AdvancedRateLimiter:
+    """نظام Rate Limiting متقدم يتتبع RPM و TPM و RPD لتجنب أخطاء 429"""
+
+    def __init__(self,
+                 max_rpm: int = 15,    # Requests per minute (آمن بدلاً من 15)
+                 max_tpm: int = 30000, # Tokens per minute (آمن للحد الأقصى 32000)
+                 max_rpd: int = 1500): # Requests per day (افتراضي)
+
+        self.max_rpm = max_rpm
+        self.max_tpm = max_tpm
+        self.max_rpd = max_rpd
+
+        self.minute_requests = deque() # [(timestamp, tokens_count), ...]
+        self.day_requests = deque()    # [timestamp, ...]
+
+    def _cleanup_old_records(self, now: float):
+        """إزالة السجلات القديمة التي تجاوزت المدة الزمنية"""
+        # تنظيف سجلات الدقيقة (60 ثانية)
+        while self.minute_requests and self.minute_requests[0][0] < now - 60:
+            self.minute_requests.popleft()
+
+        # تنظيف سجلات اليوم (86400 ثانية = 24 ساعة)
+        while self.day_requests and self.day_requests[0] < now - 86400:
+            self.day_requests.popleft()
+
+    def get_current_tpm(self) -> int:
+        """حساب عدد التوكنز المستهلكة في الدقيقة الحالية"""
+        return sum(req[1] for req in self.minute_requests)
+
+    def can_make_request(self, estimated_tokens: int) -> bool:
+        """التحقق من إمكانية إرسال طلب جديد بناءً على الـ Limits الثلاثة"""
+        now = time.time()
+        self._cleanup_old_records(now)
+
+        # 1. فحص حد الطلبات اليومية (RPD)
+        if len(self.day_requests) >= self.max_rpd:
+            return False
+
+        # 2. فحص حد الطلبات في الدقيقة (RPM)
+        if len(self.minute_requests) >= self.max_rpm:
+            return False
+
+        # 3. فحص حد التوكنز في الدقيقة (TPM)
+        current_tpm = self.get_current_tpm()
+        if current_tpm + estimated_tokens > self.max_tpm:
+            return False
+
+        return True
+
+    def add_request(self, estimated_tokens: int):
+        """تسجيل طلب جديد مع عدد التوكنز المقدرة"""
+        now = time.time()
+        self.minute_requests.append((now, estimated_tokens))
+        self.day_requests.append(now)
+
+    def time_until_next_request(self, estimated_tokens: int) -> float:
+        """الوقت المتبقي حتى يمكن إرسال طلب جديد"""
+        now = time.time()
+        self._cleanup_old_records(now)
+
+        if self.can_make_request(estimated_tokens):
+            return 0.0
+
+        wait_times = []
+
+        # إذا تجاوزنا RPM، ننتظر حتى يخرج أقدم طلب من النافذة
+        if len(self.minute_requests) >= self.max_rpm:
+            wait_times.append((self.minute_requests[0][0] + 60) - now)
+
+        # إذا تجاوزنا TPM، ننتظر حتى تخرج طلبات كافية لتحرير مساحة للتوكنز الجديدة
+        current_tpm = self.get_current_tpm()
+        if current_tpm + estimated_tokens > self.max_tpm:
+            freed_tokens = 0
+            for req_time, req_tokens in self.minute_requests:
+                freed_tokens += req_tokens
+                if current_tpm - freed_tokens + estimated_tokens <= self.max_tpm:
+                    wait_times.append((req_time + 60) - now)
+                    break
+
+        # إذا تجاوزنا RPD (نادر الحدوث في الاستخدام العادي للمفاتيح المتعددة)
+        if len(self.day_requests) >= self.max_rpd:
+            wait_times.append((self.day_requests[0] + 86400) - now)
+
+        return max(wait_times) if wait_times else 1.0
+
+
 class SlidingWindowRateLimiter:
-    """نظام rate limiting بنافذة منزلقة لدقة أفضل"""
+    """نظام rate limiting بنافذة منزلقة لدقة أفضل - (مُهمل، تم استبداله بـ AdvancedRateLimiter)"""
     
     def __init__(self, max_requests: int = 25, window_seconds: int = 60):
         self.max_requests = max_requests
@@ -191,23 +301,26 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyC-5FS_Lk6Hv0kgc5iypa60c5gN-u-dsL0",
-            "AIzaSyAIwqqpiSD3laMLbouTSSRzy4ax3-7B4wk",
-            "AIzaSyDyhShDlqanEcy8PQyYa5vhUEdG__N8Vuw",
-            "AIzaSyBc1XvpeKl7qLbXGxANEJ1y_-IRh8TXOS0",
-            "AIzaSyAJjhudGlJRpDirRREx0rV8RHdwBuHaaEg",
-            "AIzaSyCgnAaiIiT0CCMJMXBkDYOaSbSdu7VCzx0",
-            "AIzaSyDXHRTVI1IzgNOFiiIaN7PwwBgZFLvW7l8",
-            "AIzaSyAeKu-sgVBKzhjZmfe4oVDKPeZM7kpC_M0",
-            "AIzaSyAQT8k-L4D9UGZDTdLPgMZSn27yVoBVNgI",
-
+            "AIzxV5Q-3MSnZGZVy28i_TI",
+            "AIzacc9qum6HzqgVX7CRRRO-tQ0Rg",
+            "AwBqit3gMz7v2D20TJ1yYL6ryvGIUA",
+            "KzsBGWQq0p4s4wMMdwbQC26k9XSL2ZQ",
+            "A-Ck3QWJ88CspKPSfTDsl1huPc",
+            "AIzaSyDnX2eJMKvwfBUFlnJXYLCjbCY",
+            "-yqe7vKaQ",
+            "AIzaSyAt-nT8d4r2i3tG50sQ4aLI",
+            "AIzaSyB15sEBpgBZs-K0bxZX5avc8",
+            "AIuaG7vUXygPxRacsr11WD_ndJFyvuk",
+            "AIzaSyBfu6xvqs3xDumShoYUox9W8E",
+        
         ]
         
         if isinstance(api_keys, list):
             self.api_keys.extend([key for key in api_keys if key not in self.api_keys])
         
-        # Rate limiters لكل مفتاح - استخدام النظام المحسن
-        self.rate_limiters = {key: SlidingWindowRateLimiter() for key in self.api_keys}
+        # Rate limiters لكل مفتاح - استخدام النظام المحسن (RPM, TPM, RPD)
+        # إعدادات لـ Gemini Free Tier (آمنة): 2 RPM, 30,000 TPM, 48 RPD
+        self.rate_limiters = {key: AdvancedRateLimiter(max_rpm=2, max_tpm=30000, max_rpd=48) for key in self.api_keys}
         
         # إحصائيات متقدمة لكل مفتاح
         self.key_stats = {key: KeyStatistics() for key in self.api_keys}
@@ -254,8 +367,8 @@ class EnhancedGeminiAPI:
             del self.blocked_keys[key]
             logger.info(f"تم إلغاء حظر المفتاح: {key[:10]}...")
     
-    async def get_optimal_api_key(self) -> Optional[str]:
-        """الحصول على أفضل مفتاح API بناءً على الصحة والأداء"""
+    async def get_optimal_api_key(self, estimated_tokens: int) -> Optional[str]:
+        """الحصول على أفضل مفتاح API بناءً على التوكنز المطلوبة والصحة والأداء"""
         self._unblock_keys()
         
         available_keys = []
@@ -265,8 +378,8 @@ class EnhancedGeminiAPI:
             if key in self.blocked_keys:
                 continue
             
-            # التحقق من rate limit
-            if not self.rate_limiters[key].can_make_request():
+            # التحقق من rate limit (RPM, TPM, RPD)
+            if not self.rate_limiters[key].can_make_request(estimated_tokens):
                 continue
             
             # التحقق من صحة المفتاح
@@ -281,21 +394,21 @@ class EnhancedGeminiAPI:
             min_wait = float('inf')
             for key in self.api_keys:
                 if key not in self.blocked_keys:
-                    wait_time = self.rate_limiters[key].time_until_next_request()
+                    wait_time = self.rate_limiters[key].time_until_next_request(estimated_tokens)
                     min_wait = min(min_wait, wait_time)
             
             if min_wait < float('inf') and min_wait > 0:
-                logger.warning(f"جميع المفاتيح مشغولة، انتظار {min_wait:.1f} ثانية...")
+                logger.warning(f"جميع المفاتيح مشغولة أو وصلت للحد الأقصى (الانتظار المقدر: {min_wait:.1f} ثانية)...")
                 await asyncio.sleep(min_wait + 0.5)
-                return await self.get_optimal_api_key()
+                return await self.get_optimal_api_key(estimated_tokens)
             
-            # إذا فشلت كل المحاولات، أعد تعيين المفاتيح المحظورة
-            logger.warning("جميع المفاتيح مشغولة، انتظار...")
+            # إذا فشلت كل المحاولات (كل المفاتيح محظورة)، أعد تعيين المفاتيح المحظورة وانتظر
+            logger.warning("جميع المفاتيح محظورة أو مشغولة بشكل كامل، انتظار 15 ثانية...")
             await asyncio.sleep(15)
             self.blocked_keys.clear()
-            return await self.get_optimal_api_key()
+            return await self.get_optimal_api_key(estimated_tokens)
         
-        # اختيار المفتاح الأفضل صحة وأقل استخداماً
+        # اختيار المفتاح الأفضل صحة وأقل استخداماً لتحقيق توازن (Round-Robin)
         available_keys.sort(key=lambda x: (x[1], -self.key_stats[x[0]].total_requests), reverse=True)
         best_key = available_keys[0][0]
         
@@ -304,19 +417,23 @@ class EnhancedGeminiAPI:
     async def make_precision_request(self, prompt: str, system_instruction: str = "", 
                                    temperature: float = 0.05, max_tokens: int = 8192,
                                    request_type: str = "translation") -> Optional[str]:
-        """إرسال طلب دقيق مع إعدادات محسنة"""
+        """إرسال طلب دقيق مع إعدادات محسنة وتتبع دقيق للـ Tokens"""
         
         # التأكد من وجود جلسة نشطة
         await self._ensure_session()
         
+        # تقدير عدد الـ Tokens قبل إرسال الطلب (System + Prompt)
+        estimated_tokens = TokenEstimator.estimate_tokens(prompt + system_instruction)
+        logger.debug(f"[{request_type}] Tokens مقدرة للطلب: {estimated_tokens}")
+
         for attempt in range(self.max_retries):
-            api_key = await self.get_optimal_api_key()
+            api_key = await self.get_optimal_api_key(estimated_tokens)
             if not api_key:
-                logger.error("لا توجد مفاتيح API متاحة")
+                logger.error("لا توجد مفاتيح API متاحة أو كافية لتلبية هذا الطلب")
                 return None
             
-            # تسجيل الطلب
-            self.rate_limiters[api_key].add_request()
+            # تسجيل الطلب بالتوكنز المقدرة لخصمها من حصة المفتاح (TPM)
+            self.rate_limiters[api_key].add_request(estimated_tokens)
             request_start = time.time()
             
             headers = {
