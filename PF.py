@@ -191,25 +191,16 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyAgJuU6WUs1Fx9zVUWoJHQC8wWtIRYSgBg",
-            "AIzaSyCL41EGxwiJPVruTMM4SNGo5wpwEFHv_z8",
-            "AIzaSyDXpdfSzKJt0GZk9CWCB_HjeWWIg4qAsxc",
-            "AIzaSyBmdE54PqqODcbRpGAqUaiBd06gf0VeWSg",
-            "AIzaSyB6ic5I6N_qvo_hcew9EYESzgO84MPlvNU",
-            "AIzaSyD65E62d0zwmfOJTpWgoSlmYFmzds7P7w0",
-            "AIzaSyDznIaju8anAxkYShVbwo45vtfA75RAYC8",
-            "AIzaSyAbSVOASFjgiTKN9r7nH2a3t_dqajK9EgU",
-            "AIzaSyCn-Bzl0TR9x4VdfppJVmb-jgnlBl0l5Do",
-            "AIzaSyAsA26V9VdNODquX1g2X5cQgHZZ62KJJQI",
-            "AIzaSyCYRAazDlkiASn3xHHh6Tmy_GxaHSk9ER4",
-            "AIzaSyCw0wg1tcSAQ7PVOXN6ZeF6B9q2lq2te_k",
-            "AIzaSyC0d5j9qavMOHeoHmCqTVfYY_q0SMEQ9Ko",
-            "AIzaSyASkZwW0EEaGWRBbFHx5VZGV0VZGSr4YTs",
-            "AIzaSyDmXtZJbZlPwi6KXbyaZHgSt7cbrewAbfs",
-            "AIzaSyBB55GJqV3iE83kBDJd4Si86hPbwjNsceE",
-            "AIzaSyC3-Hk9lhbjySsBPjCu47J_5HEA6em5lIQ",
-            "AIzaSyDDfnDgK6HoG4FrXehjsng4Y4ltCtZH4z8",
-            "AIzaSyBmQ5LrJ-1vCzPG4azVV9mpQ1tnAPYwFw4"
+            "AIzaSyC-5FS_Lk6Hv0kgc5iypa60c5gN-u-dsL0",
+            "AIzaSyAIwqqpiSD3laMLbouTSSRzy4ax3-7B4wk",
+            "AIzaSyDyhShDlqanEcy8PQyYa5vhUEdG__N8Vuw",
+            "AIzaSyBc1XvpeKl7qLbXGxANEJ1y_-IRh8TXOS0",
+            "AIzaSyAJjhudGlJRpDirRREx0rV8RHdwBuHaaEg",
+            "AIzaSyCgnAaiIiT0CCMJMXBkDYOaSbSdu7VCzx0",
+            "AIzaSyDXHRTVI1IzgNOFiiIaN7PwwBgZFLvW7l8",
+            "AIzaSyAeKu-sgVBKzhjZmfe4oVDKPeZM7kpC_M0",
+            "AIzaSyAQT8k-L4D9UGZDTdLPgMZSn27yVoBVNgI",
+
         ]
         
         if isinstance(api_keys, list):
@@ -225,7 +216,7 @@ class EnhancedGeminiAPI:
         self.blocked_keys = {}  # {key: unblock_time}
         
         # إعدادات الAPI - نفس الإعدادات الأصلية
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
         self.rate_limit_per_minute = 25
         self.max_retries = 6
         self.retry_delays = [3, 6, 12, 24, 48, 96]
