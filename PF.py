@@ -36,6 +36,9 @@ from collections import deque
 import asyncio
 import aiohttp
 import time
+import socket
+import binascii
+from aiohttp_socks import ProxyConnector
 
 # ============= تحسين 1: نظام السجلات المحسن مع Rotation =============
 def setup_comprehensive_logging():
@@ -295,24 +298,130 @@ class KeyStatistics:
         return max(0, min(100, health_score))
 
 # ============= الفئة المحسنة الرئيسية (مع المفاتيح كما هي) =============
+class TorConnectionManager:
+    """مدير اتصالات Tor للتحكم في تغيير عنوان الـ IP برمجياً"""
+
+    def __init__(self, socks_port: int = 9050, control_port: int = 9051):
+        self.socks_url = f"socks5://127.0.0.1:{socks_port}"
+        self.control_port = control_port
+        self.control_host = '127.0.0.1'
+        self.current_ip = None
+        self.last_rotation_time = 0
+        self.min_rotation_interval = 10  # الحد الأدنى بين كل تغيير للـ IP بالثواني لمنع الإرهاق
+
+    def get_connector(self) -> ProxyConnector:
+        """الحصول على Connector لاستخدامه مع aiohttp"""
+        return ProxyConnector.from_url(self.socks_url)
+
+    def _read_auth_cookie(self) -> bytes:
+        """قراءة ملف مصادقة Tor"""
+        cookie_paths = [
+            '/run/tor/control.authcookie',
+            '/var/run/tor/control.authcookie',
+            '/var/lib/tor/control_auth_cookie'
+        ]
+
+        for path in cookie_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'rb') as f:
+                        return f.read()
+                except PermissionError:
+                    logger.warning(f"لا يوجد صلاحية لقراءة ملف المصادقة: {path}. الرجاء التأكد من صلاحيات المستخدم.")
+                except Exception as e:
+                    logger.warning(f"خطأ في قراءة ملف المصادقة {path}: {str(e)}")
+
+        return b''
+
+    def request_new_ip(self) -> bool:
+        """الطلب من Tor تغيير مسار الاتصال للحصول على عنوان IP جديد"""
+        now = time.time()
+        if now - self.last_rotation_time < self.min_rotation_interval:
+            logger.info("تم تخطي طلب تغيير IP جديد لأنه تم تغييره للتو.")
+            return False # نرجع False حتى لا يتم تصفير الحظر والمحاولة من جديد مباشرة بنفس الـ IP
+
+        logger.info("جاري طلب عنوان IP جديد من Tor...")
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(5.0)
+                s.connect((self.control_host, self.control_port))
+
+                # قراءة الكوكي وإرسال المصادقة
+                cookie = self._read_auth_cookie()
+                if cookie:
+                    # مصادقة عبر Cookie
+                    hex_cookie = binascii.hexlify(cookie).decode('ascii')
+                    auth_cmd = f'AUTHENTICATE {hex_cookie}\r\n'
+                else:
+                    # محاولة المصادقة بدون كلمة مرور (إذا كان معداً كذلك)
+                    auth_cmd = 'AUTHENTICATE ""\r\n'
+
+                s.sendall(auth_cmd.encode('ascii'))
+                response = s.recv(1024).decode('ascii')
+
+                if not response.startswith('250'):
+                    logger.error(f"فشل المصادقة مع Tor Control Port: {response.strip()}")
+                    return False
+
+                # إرسال إشارة تغيير الهوية (NEWNYM)
+                s.sendall(b'SIGNAL NEWNYM\r\n')
+                response = s.recv(1024).decode('ascii')
+
+                if response.startswith('250'):
+                    logger.info("تم إرسال إشارة تغيير IP بنجاح إلى Tor. ننتظر قليلاً لإنشاء المسار الجديد...")
+                    self.last_rotation_time = time.time()
+                    time.sleep(3) # انتظار تور لبناء مسار جديد
+                    return True
+                else:
+                    logger.error(f"فشل في إرسال إشارة NEWNYM: {response.strip()}")
+                    return False
+
+        except ConnectionRefusedError:
+            logger.error(f"تم رفض الاتصال بمنفذ التحكم لـ Tor ({self.control_port}). تأكد من تفعيله في torrc.")
+            return False
+        except Exception as e:
+            logger.error(f"خطأ غير متوقع أثناء الاتصال بمنفذ تحكم Tor: {str(e)}")
+            return False
+
+    async def verify_connection(self) -> bool:
+        """التحقق من أن الاتصال يمر عبر Tor ويعمل بنجاح"""
+        try:
+            connector = self.get_connector()
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get('http://httpbin.org/ip', timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        new_ip = data.get('origin', 'unknown')
+
+                        if self.current_ip != new_ip:
+                            logger.info(f"تم التحقق من الاتصال عبر Tor بنجاح! عنوان الـ IP الحالي: {new_ip}")
+                            self.current_ip = new_ip
+                        return True
+                    else:
+                        logger.error(f"فشل في التحقق من الاتصال (رمز الحالة: {response.status})")
+                        return False
+        except Exception as e:
+            logger.error(f"فشل الاتصال عبر بروكسي Tor: {str(e)}")
+            return False
+
+
 class EnhancedGeminiAPI:
-    """إدارة محسنة لـ Gemini API مع مفاتيح متعددة"""
+    """إدارة محسنة لـ Gemini API مع مفاتيح متعددة وتدوير الـ IP عبر Tor"""
     
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzxV5Q-3MSnZGZVy28i_TI",
-            "AIzacc9qum6HzqgVX7CRRRO-tQ0Rg",
-            "AwBqit3gMz7v2D20TJ1yYL6ryvGIUA",
-            "KzsBGWQq0p4s4wMMdwbQC26k9XSL2ZQ",
-            "A-Ck3QWJ88CspKPSfTDsl1huPc",
-            "AIzaSyDnX2eJMKvwfBUFlnJXYLCjbCY",
-            "-yqe7vKaQ",
-            "AIzaSyAt-nT8d4r2i3tG50sQ4aLI",
-            "AIzaSyB15sEBpgBZs-K0bxZX5avc8",
-            "AIuaG7vUXygPxRacsr11WD_ndJFyvuk",
-            "AIzaSyBfu6xvqs3xDumShoYUox9W8E",
-        
+            "AIzaSyCoKRKqxBAW5XRldTamXjPBaa8",
+            "AIzaSyBOg7Fcc9qum7CRRRO-tQ0Rg",
+            "AIzaSyCq96pXxveGMoPlXAe19Zms",
+            "AIzaSyAQEIPnASJKmG22gTBYlc1Q4C7pQ",
+            "AIzaSyDcE4H4BrVIQx7M8u-ZTVM0Zg",
+            "AIzaSyAiHCZHuNyxdMnzxMnHC1ZC0",
+            "AIzaSyBWoJ1JToWqR1Vb7yg-AglJyU",
+            "AIzaSyAUcgeEdeu5EB33i-p_A",
+            "AIzaSyDyScB6V94oZAiNgYYZi3A",
+            "AIzaSyCEK4C8TkEYftcLo6kXv_3gaM",
         ]
         
         if isinstance(api_keys, list):
@@ -334,20 +443,28 @@ class EnhancedGeminiAPI:
         self.max_retries = 6
         self.retry_delays = [3, 6, 12, 24, 48, 96]
         
+        # دمج Tor
+        self.tor_manager = TorConnectionManager()
+
         # Connection pool للأداء الأفضل
         self.connector = None
         self.session = None
         
-        logger.info(f"تم تهيئة Gemini API مع {len(self.api_keys)} مفتاح")
+        logger.info(f"تم تهيئة Gemini API مع {len(self.api_keys)} مفتاح مع دعم Tor للتدوير")
     
-    async def _ensure_session(self):
-        """التأكد من وجود جلسة HTTP نشطة مع connection pooling"""
-        if not self.session or self.session.closed:
-            self.connector = aiohttp.TCPConnector(
-                limit=100,  # الحد الأقصى للاتصالات
-                ttl_dns_cache=300,  # cache DNS لـ 5 دقائق
-                enable_cleanup_closed=True
-            )
+    async def _ensure_session(self, force_new=False):
+        """التأكد من وجود جلسة HTTP نشطة، يمرر الاتصال عبر Tor.
+        إذا تم طلب force_new=True، يتم إنشاء جلسة جديدة لضمان استخدام الـ IP الجديد.
+        """
+        # في حالة الاستخدام المتزامن لا نغلق الجلسة القديمة مباشرة لتجنب كسر الطلبات الجارية
+        if force_new:
+            # احتفظ بالقديمة حتى يتم جمع القمامة
+            old_session = self.session
+            self.session = None
+
+        if force_new or not self.session or self.session.closed:
+            # استخدام بروكسي Tor
+            self.connector = self.tor_manager.get_connector()
             timeout = aiohttp.ClientTimeout(total=300)
             self.session = aiohttp.ClientSession(
                 connector=self.connector,
@@ -390,23 +507,41 @@ class EnhancedGeminiAPI:
             available_keys.append((key, health_score))
         
         if not available_keys:
-            # انتظار أقل وقت ممكن
-            min_wait = float('inf')
-            for key in self.api_keys:
-                if key not in self.blocked_keys:
-                    wait_time = self.rate_limiters[key].time_until_next_request(estimated_tokens)
-                    min_wait = min(min_wait, wait_time)
+            # إذا فشلت كل المحاولات والمفاتيح محظورة أو مشغولة، نقوم بتغيير الـ IP
+            logger.warning("جميع المفاتيح وصلت للحد الأقصى أو محظورة. جاري تدوير الـ IP عبر Tor لتخطي الحظر...")
             
-            if min_wait < float('inf') and min_wait > 0:
-                logger.warning(f"جميع المفاتيح مشغولة أو وصلت للحد الأقصى (الانتظار المقدر: {min_wait:.1f} ثانية)...")
-                await asyncio.sleep(min_wait + 0.5)
+            # نطلب IP جديد
+            success = self.tor_manager.request_new_ip()
+            if success:
+                # التحقق والتأكيد
+                await self.tor_manager.verify_connection()
+                # إعادة إنشاء الجلسة حتى لا نستخدم اتصالات قديمة
+                await self._ensure_session(force_new=True)
+
+                # بعد تغيير الـ IP، نقوم بتصفير حظر المفاتيح جزئياً لنحاول مرة أخرى
+                logger.info("تم تصفير حظر المفاتيح للبدء من جديد مع الـ IP الجديد.")
+                self.blocked_keys.clear()
+
+                # ننتظر قليلاً لضمان الاستقرار
+                await asyncio.sleep(2)
                 return await self.get_optimal_api_key(estimated_tokens)
-            
-            # إذا فشلت كل المحاولات (كل المفاتيح محظورة)، أعد تعيين المفاتيح المحظورة وانتظر
-            logger.warning("جميع المفاتيح محظورة أو مشغولة بشكل كامل، انتظار 15 ثانية...")
-            await asyncio.sleep(15)
-            self.blocked_keys.clear()
-            return await self.get_optimal_api_key(estimated_tokens)
+            else:
+                # إذا فشل Tor في تغيير الـ IP نعود للانتظار التقليدي
+                min_wait = float('inf')
+                for key in self.api_keys:
+                    if key not in self.blocked_keys:
+                        wait_time = self.rate_limiters[key].time_until_next_request(estimated_tokens)
+                        min_wait = min(min_wait, wait_time)
+
+                if min_wait < float('inf') and min_wait > 0:
+                    logger.warning(f"الانتظار المقدر: {min_wait:.1f} ثانية...")
+                    await asyncio.sleep(min_wait + 0.5)
+                    return await self.get_optimal_api_key(estimated_tokens)
+
+                logger.warning("جميع المفاتيح محظورة بالكامل وتغيير IP فشل. انتظار 15 ثانية...")
+                await asyncio.sleep(15)
+                self.blocked_keys.clear()
+                return await self.get_optimal_api_key(estimated_tokens)
         
         # اختيار المفتاح الأفضل صحة وأقل استخداماً لتحقيق توازن (Round-Robin)
         available_keys.sort(key=lambda x: (x[1], -self.key_stats[x[0]].total_requests), reverse=True)
@@ -508,14 +643,21 @@ class EnhancedGeminiAPI:
                             logger.warning(f"استجابة غير متوقعة من Gemini: {result}")
                             self.key_stats[api_key].record_failure("invalid_response")
                             
-                    elif response.status == 429:
-                        logger.warning(f"تجاوز حد المعدل للمفتاح {api_key[:10]}... انتظار")
-                        self.key_stats[api_key].record_failure("rate_limit")
+                    elif response.status in [429, 403]:
+                        logger.warning(f"خطأ {response.status} (تجاوز/حظر) للمفتاح {api_key[:10]}...")
+                        self.key_stats[api_key].record_failure("rate_limit" if response.status == 429 else "forbidden")
                         
                         # حظر المفتاح مؤقتاً
                         block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
                         self.blocked_keys[api_key] = time.time() + block_duration
                         
+                        # ميزة ذكية: إذا واجهنا 429 أكثر من مرة متتالية، ربما IP تم حظره.
+                        # سنقوم بتغيير الـ IP فوراً إذا استنفدنا نصف المحاولات
+                        if attempt >= self.max_retries // 2:
+                            logger.info("اكتشاف حظر متكرر. جاري تبديل عنوان الـ IP عبر Tor بشكل استباقي...")
+                            if self.tor_manager.request_new_ip():
+                                await self._ensure_session(force_new=True)
+
                         await asyncio.sleep(block_duration)
                         
                     elif response.status >= 500:
