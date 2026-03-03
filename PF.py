@@ -36,9 +36,6 @@ from collections import deque
 import asyncio
 import aiohttp
 import time
-import socket
-import binascii
-from aiohttp_socks import ProxyConnector
 
 # ============= تحسين 1: نظام السجلات المحسن مع Rotation =============
 def setup_comprehensive_logging():
@@ -90,145 +87,75 @@ def setup_comprehensive_logging():
 
 logger, quality_logger = setup_comprehensive_logging()
 
-# ============= تحسين 2: نظام Rate Limiting وحساب Tokens محسن =============
-
-class TokenEstimator:
-    """أداة لتقدير عدد الـ Tokens في النص لتجنب تجاوز حد 32K TPM"""
-
-    @staticmethod
-    def estimate_tokens(text: str) -> int:
-        """
-        تقدير عدد الـ Tokens بناءً على طول النص.
-        قاعدة عامة لـ Gemini:
-        - الإنجليزية: 1 token ≈ 4 characters
-        - العربية: 1 token ≈ 2.5 characters (لأن الأحرف العربية تستهلك tokens أكثر)
-        سنستخدم تقديراً متحفظاً (آمناً): 1 token لكل حرفين لضمان عدم تجاوز الحد.
-        """
-        if not text:
-            return 0
-
-        # إضافة هامش أمان (Safety margin) للـ system instructions والـ prompt wrapper
-        base_tokens = 50
-
-        # نقدر أن كل حرفين يمثلان Token واحد لضمان الأمان الأقصى مع النصوص العربية
-        text_tokens = len(text) // 2
-
-        return base_tokens + text_tokens
-
-class AdvancedRateLimiter:
-    """نظام Rate Limiting متقدم يتتبع RPM و TPM و RPD لتجنب أخطاء 429"""
-
-    def __init__(self,
-                 max_rpm: int = 15,    # Requests per minute (آمن بدلاً من 15)
-                 max_tpm: int = 30000, # Tokens per minute (آمن للحد الأقصى 32000)
-                 max_rpd: int = 1500): # Requests per day (افتراضي)
-
+# ============= تحسين 2: نظام Rate Limiting محسن (Tokens & Requests) =============
+class TokenRateLimiter:
+    """نظام rate limiting متقدم يتعقب الطلبات والتوكنز والحد اليومي"""
+    def __init__(self, max_rpm: int = 2, max_tpm: int = 32000, max_rpd: int = 50):
         self.max_rpm = max_rpm
         self.max_tpm = max_tpm
         self.max_rpd = max_rpd
 
-        self.minute_requests = deque() # [(timestamp, tokens_count), ...]
-        self.day_requests = deque()    # [timestamp, ...]
+        self.requests = deque() # tuples of (time, tokens)
+        self.daily_requests = deque() # times of requests within the last 24h
 
-    def _cleanup_old_records(self, now: float):
-        """إزالة السجلات القديمة التي تجاوزت المدة الزمنية"""
-        # تنظيف سجلات الدقيقة (60 ثانية)
-        while self.minute_requests and self.minute_requests[0][0] < now - 60:
-            self.minute_requests.popleft()
-
-        # تنظيف سجلات اليوم (86400 ثانية = 24 ساعة)
-        while self.day_requests and self.day_requests[0] < now - 86400:
-            self.day_requests.popleft()
-
-    def get_current_tpm(self) -> int:
-        """حساب عدد التوكنز المستهلكة في الدقيقة الحالية"""
-        return sum(req[1] for req in self.minute_requests)
-
-    def can_make_request(self, estimated_tokens: int) -> bool:
-        """التحقق من إمكانية إرسال طلب جديد بناءً على الـ Limits الثلاثة"""
+    def can_make_request(self, estimated_tokens: int = 0) -> bool:
         now = time.time()
-        self._cleanup_old_records(now)
+        # إزالة الطلبات القديمة خارج الدقيقة
+        while self.requests and self.requests[0][0] < now - 60:
+            self.requests.popleft()
 
-        # 1. فحص حد الطلبات اليومية (RPD)
-        if len(self.day_requests) >= self.max_rpd:
+        # إزالة الطلبات القديمة خارج اليوم
+        while self.daily_requests and self.daily_requests[0] < now - 86400:
+            self.daily_requests.popleft()
+
+        current_rpm = len(self.requests)
+        current_tpm = sum(tokens for _, tokens in self.requests)
+        current_rpd = len(self.daily_requests)
+        
+        if current_rpm >= self.max_rpm:
             return False
-
-        # 2. فحص حد الطلبات في الدقيقة (RPM)
-        if len(self.minute_requests) >= self.max_rpm:
-            return False
-
-        # 3. فحص حد التوكنز في الدقيقة (TPM)
-        current_tpm = self.get_current_tpm()
         if current_tpm + estimated_tokens > self.max_tpm:
+            return False
+        if current_rpd >= self.max_rpd:
             return False
 
         return True
 
-    def add_request(self, estimated_tokens: int):
-        """تسجيل طلب جديد مع عدد التوكنز المقدرة"""
+    def add_request(self, estimated_tokens: int = 0):
         now = time.time()
-        self.minute_requests.append((now, estimated_tokens))
-        self.day_requests.append(now)
+        self.requests.append((now, estimated_tokens))
+        self.daily_requests.append(now)
 
-    def time_until_next_request(self, estimated_tokens: int) -> float:
-        """الوقت المتبقي حتى يمكن إرسال طلب جديد"""
-        now = time.time()
-        self._cleanup_old_records(now)
-
+    def time_until_next_request(self, estimated_tokens: int = 0) -> float:
         if self.can_make_request(estimated_tokens):
-            return 0.0
+            return 0
+        
+        now = time.time()
+
+        while self.requests and self.requests[0][0] < now - 60:
+            self.requests.popleft()
+        while self.daily_requests and self.daily_requests[0] < now - 86400:
+            self.daily_requests.popleft()
 
         wait_times = []
 
-        # إذا تجاوزنا RPM، ننتظر حتى يخرج أقدم طلب من النافذة
-        if len(self.minute_requests) >= self.max_rpm:
-            wait_times.append((self.minute_requests[0][0] + 60) - now)
+        if len(self.daily_requests) >= self.max_rpd:
+            wait_times.append((self.daily_requests[0] + 86400) - now)
 
-        # إذا تجاوزنا TPM، ننتظر حتى تخرج طلبات كافية لتحرير مساحة للتوكنز الجديدة
-        current_tpm = self.get_current_tpm()
+        if len(self.requests) >= self.max_rpm:
+            wait_times.append((self.requests[0][0] + 60) - now)
+
+        current_tpm = sum(tokens for _, tokens in self.requests)
         if current_tpm + estimated_tokens > self.max_tpm:
-            freed_tokens = 0
-            for req_time, req_tokens in self.minute_requests:
-                freed_tokens += req_tokens
-                if current_tpm - freed_tokens + estimated_tokens <= self.max_tpm:
+            tokens_to_drop = (current_tpm + estimated_tokens) - self.max_tpm
+            dropped = 0
+            for req_time, tokens in self.requests:
+                dropped += tokens
+                if dropped >= tokens_to_drop:
                     wait_times.append((req_time + 60) - now)
                     break
 
-        # إذا تجاوزنا RPD (نادر الحدوث في الاستخدام العادي للمفاتيح المتعددة)
-        if len(self.day_requests) >= self.max_rpd:
-            wait_times.append((self.day_requests[0] + 86400) - now)
-
-        return max(wait_times) if wait_times else 1.0
-
-
-class SlidingWindowRateLimiter:
-    """نظام rate limiting بنافذة منزلقة لدقة أفضل - (مُهمل، تم استبداله بـ AdvancedRateLimiter)"""
-    
-    def __init__(self, max_requests: int = 25, window_seconds: int = 60):
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self.requests = deque()
-    
-    def can_make_request(self) -> bool:
-        """التحقق من إمكانية إرسال طلب جديد"""
-        now = time.time()
-        # إزالة الطلبات القديمة خارج النافذة
-        while self.requests and self.requests[0] < now - self.window_seconds:
-            self.requests.popleft()
-        
-        return len(self.requests) < self.max_requests
-    
-    def add_request(self):
-        """تسجيل طلب جديد"""
-        self.requests.append(time.time())
-    
-    def time_until_next_request(self) -> float:
-        """الوقت المتبقي حتى يمكن إرسال طلب جديد"""
-        if self.can_make_request():
-            return 0
-        
-        oldest_request = self.requests[0]
-        return (oldest_request + self.window_seconds) - time.time()
+        return max(wait_times) if wait_times else 0.0
 
 # ============= تحسين 3: إحصائيات محسنة للمفاتيح =============
 class KeyStatistics:
@@ -298,138 +225,30 @@ class KeyStatistics:
         return max(0, min(100, health_score))
 
 # ============= الفئة المحسنة الرئيسية (مع المفاتيح كما هي) =============
-class TorConnectionManager:
-    """مدير اتصالات Tor للتحكم في تغيير عنوان الـ IP برمجياً"""
-
-    def __init__(self, socks_port: int = 9050, control_port: int = 9051):
-        self.socks_url = f"socks5://127.0.0.1:{socks_port}"
-        self.control_port = control_port
-        self.control_host = '127.0.0.1'
-        self.current_ip = None
-        self.last_rotation_time = 0
-        self.min_rotation_interval = 10  # الحد الأدنى بين كل تغيير للـ IP بالثواني لمنع الإرهاق
-
-    def get_connector(self) -> ProxyConnector:
-        """الحصول على Connector لاستخدامه مع aiohttp"""
-        return ProxyConnector.from_url(self.socks_url)
-
-    def _read_auth_cookie(self) -> bytes:
-        """قراءة ملف مصادقة Tor"""
-        cookie_paths = [
-            '/run/tor/control.authcookie',
-            '/var/run/tor/control.authcookie',
-            '/var/lib/tor/control_auth_cookie'
-        ]
-
-        for path in cookie_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, 'rb') as f:
-                        return f.read()
-                except PermissionError:
-                    logger.warning(f"لا يوجد صلاحية لقراءة ملف المصادقة: {path}. الرجاء التأكد من صلاحيات المستخدم.")
-                except Exception as e:
-                    logger.warning(f"خطأ في قراءة ملف المصادقة {path}: {str(e)}")
-
-        return b''
-
-    def request_new_ip(self) -> bool:
-        """الطلب من Tor تغيير مسار الاتصال للحصول على عنوان IP جديد"""
-        now = time.time()
-        if now - self.last_rotation_time < self.min_rotation_interval:
-            logger.info("تم تخطي طلب تغيير IP جديد لأنه تم تغييره للتو.")
-            return False # نرجع False حتى لا يتم تصفير الحظر والمحاولة من جديد مباشرة بنفس الـ IP
-
-        logger.info("جاري طلب عنوان IP جديد من Tor...")
-
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(5.0)
-                s.connect((self.control_host, self.control_port))
-
-                # قراءة الكوكي وإرسال المصادقة
-                cookie = self._read_auth_cookie()
-                if cookie:
-                    # مصادقة عبر Cookie
-                    hex_cookie = binascii.hexlify(cookie).decode('ascii')
-                    auth_cmd = f'AUTHENTICATE {hex_cookie}\r\n'
-                else:
-                    # محاولة المصادقة بدون كلمة مرور (إذا كان معداً كذلك)
-                    auth_cmd = 'AUTHENTICATE ""\r\n'
-
-                s.sendall(auth_cmd.encode('ascii'))
-                response = s.recv(1024).decode('ascii')
-
-                if not response.startswith('250'):
-                    logger.error(f"فشل المصادقة مع Tor Control Port: {response.strip()}")
-                    return False
-
-                # إرسال إشارة تغيير الهوية (NEWNYM)
-                s.sendall(b'SIGNAL NEWNYM\r\n')
-                response = s.recv(1024).decode('ascii')
-
-                if response.startswith('250'):
-                    logger.info("تم إرسال إشارة تغيير IP بنجاح إلى Tor. ننتظر قليلاً لإنشاء المسار الجديد...")
-                    self.last_rotation_time = time.time()
-                    time.sleep(3) # انتظار تور لبناء مسار جديد
-                    return True
-                else:
-                    logger.error(f"فشل في إرسال إشارة NEWNYM: {response.strip()}")
-                    return False
-
-        except ConnectionRefusedError:
-            logger.error(f"تم رفض الاتصال بمنفذ التحكم لـ Tor ({self.control_port}). تأكد من تفعيله في torrc.")
-            return False
-        except Exception as e:
-            logger.error(f"خطأ غير متوقع أثناء الاتصال بمنفذ تحكم Tor: {str(e)}")
-            return False
-
-    async def verify_connection(self) -> bool:
-        """التحقق من أن الاتصال يمر عبر Tor ويعمل بنجاح"""
-        try:
-            connector = self.get_connector()
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get('http://httpbin.org/ip', timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        new_ip = data.get('origin', 'unknown')
-
-                        if self.current_ip != new_ip:
-                            logger.info(f"تم التحقق من الاتصال عبر Tor بنجاح! عنوان الـ IP الحالي: {new_ip}")
-                            self.current_ip = new_ip
-                        return True
-                    else:
-                        logger.error(f"فشل في التحقق من الاتصال (رمز الحالة: {response.status})")
-                        return False
-        except Exception as e:
-            logger.error(f"فشل الاتصال عبر بروكسي Tor: {str(e)}")
-            return False
-
-
 class EnhancedGeminiAPI:
-    """إدارة محسنة لـ Gemini API مع مفاتيح متعددة وتدوير الـ IP عبر Tor"""
+    """إدارة محسنة لـ Gemini API مع مفاتيح متعددة"""
     
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
             "AIzaSyCoKRKqxBAW5XRldTamXjPBaa8",
-            "AIzaSyBOg7Fcc9qum7CRRRO-tQ0Rg",
-            "AIzaSyCq96pXxveGMoPlXAe19Zms",
-            "AIzaSyAQEIPnASJKmG22gTBYlc1Q4C7pQ",
-            "AIzaSyDcE4H4BrVIQx7M8u-ZTVM0Zg",
-            "AIzaSyAiHCZHuNyxdMnzxMnHC1ZC0",
-            "AIzaSyBWoJ1JToWqR1Vb7yg-AglJyU",
-            "AIzaSyAUcgeEdeu5EB33i-p_A",
-            "AIzaSyDyScB6V94oZAiNgYYZi3A",
-            "AIzaSyCEK4C8TkEYftcLo6kXv_3gaM",
+            "AIzaSyBOg7Fcc9qum6HzjRRO-tQ0Rg",
+            "AIzaSyCq96pXxveGaUL_AMoPlXAe19Zms",
+            "AIzaSyAQEIPnASJKmG2t6gTBYl1Q4C7pQ",
+            "AIzaSyDcE4H4B5Jzy3IQx7M8uTVM0Zg",
+            "AIzaSyAiHCZHptFnQioO-gxMnHC1ZC0",
+            "AIzaSyBWoJ1JToWqsvRGqLU7yg-glJyU",
+            "AIzaSyAUcgeEdeu5EB3lhfYMsl3i-p_A",
+            "AIzaSyDyScB6V94og6ypaaQAiNgYYZi3A",
+            "AIzaSyCEK4C8TkEYftcj9OEoprFzLoaM",
+
         ]
         
         if isinstance(api_keys, list):
             self.api_keys.extend([key for key in api_keys if key not in self.api_keys])
         
-        # Rate limiters لكل مفتاح - استخدام النظام المحسن (RPM, TPM, RPD)
-        # إعدادات لـ Gemini Free Tier (آمنة): 2 RPM, 30,000 TPM, 48 RPD
-        self.rate_limiters = {key: AdvancedRateLimiter(max_rpm=2, max_tpm=30000, max_rpd=48) for key in self.api_keys}
+        # Rate limiters لكل مفتاح - استخدام النظام المحسن مع حدود Gemini 2.5 Pro
+        self.rate_limiters = {key: TokenRateLimiter(max_rpm=2, max_tpm=32000, max_rpd=50) for key in self.api_keys}
         
         # إحصائيات متقدمة لكل مفتاح
         self.key_stats = {key: KeyStatistics() for key in self.api_keys}
@@ -437,34 +256,28 @@ class EnhancedGeminiAPI:
         # مفاتيح محظورة مؤقتاً
         self.blocked_keys = {}  # {key: unblock_time}
         
-        # إعدادات الAPI - نفس الإعدادات الأصلية
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-        self.rate_limit_per_minute = 25
+        # التوزيع الدائري
+        self.current_key_index = 0
+
+        # إعدادات الAPI لـ Gemini 2.5 Pro
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.max_retries = 6
         self.retry_delays = [3, 6, 12, 24, 48, 96]
         
-        # دمج Tor
-        self.tor_manager = TorConnectionManager()
-
         # Connection pool للأداء الأفضل
         self.connector = None
         self.session = None
         
-        logger.info(f"تم تهيئة Gemini API مع {len(self.api_keys)} مفتاح مع دعم Tor للتدوير")
+        logger.info(f"تم تهيئة Gemini API مع {len(self.api_keys)} مفتاح")
     
-    async def _ensure_session(self, force_new=False):
-        """التأكد من وجود جلسة HTTP نشطة، يمرر الاتصال عبر Tor.
-        إذا تم طلب force_new=True، يتم إنشاء جلسة جديدة لضمان استخدام الـ IP الجديد.
-        """
-        # في حالة الاستخدام المتزامن لا نغلق الجلسة القديمة مباشرة لتجنب كسر الطلبات الجارية
-        if force_new:
-            # احتفظ بالقديمة حتى يتم جمع القمامة
-            old_session = self.session
-            self.session = None
-
-        if force_new or not self.session or self.session.closed:
-            # استخدام بروكسي Tor
-            self.connector = self.tor_manager.get_connector()
+    async def _ensure_session(self):
+        """التأكد من وجود جلسة HTTP نشطة مع connection pooling"""
+        if not self.session or self.session.closed:
+            self.connector = aiohttp.TCPConnector(
+                limit=100,  # الحد الأقصى للاتصالات
+                ttl_dns_cache=300,  # cache DNS لـ 5 دقائق
+                enable_cleanup_closed=True
+            )
             timeout = aiohttp.ClientTimeout(total=300)
             self.session = aiohttp.ClientSession(
                 connector=self.connector,
@@ -484,91 +297,94 @@ class EnhancedGeminiAPI:
             del self.blocked_keys[key]
             logger.info(f"تم إلغاء حظر المفتاح: {key[:10]}...")
     
-    async def get_optimal_api_key(self, estimated_tokens: int) -> Optional[str]:
-        """الحصول على أفضل مفتاح API بناءً على التوكنز المطلوبة والصحة والأداء"""
-        self._unblock_keys()
-        
-        available_keys = []
-        
-        for key in self.api_keys:
-            # تخطي المفاتيح المحظورة
-            if key in self.blocked_keys:
+    def estimate_tokens(self, text: str) -> int:
+        """تقدير عدد التوكنز في النص (تقريباً 4 أحرف = 1 توكن)"""
+        return max(1, len(text) // 4)
+
+    async def get_optimal_api_key(self, estimated_tokens: int = 0) -> Optional[str]:
+        """الحصول على المفتاح التالي المتاح باستخدام Round-Robin مع انتظار ذكي"""
+        while True:
+            self._unblock_keys()
+            
+            num_keys = len(self.api_keys)
+            if num_keys == 0:
+                return None
+
+            checked_keys = 0
+            
+            # البحث عن مفتاح متاح
+            while checked_keys < num_keys:
+                key = self.api_keys[self.current_key_index]
+                self.current_key_index = (self.current_key_index + 1) % num_keys
+                checked_keys += 1
+
+                # تخطي المفاتيح المحظورة
+                if key in self.blocked_keys:
+                    continue
+
+                # التحقق من rate limit
+                if not self.rate_limiters[key].can_make_request(estimated_tokens):
+                    continue
+
+                # التحقق من صحة المفتاح
+                health_score = self.key_stats[key].get_health_score()
+                if health_score < 10:
+                    continue
+
+                return key
+
+            # إذا وصلنا هنا، يعني أن كل المفاتيح مشغولة، يجب الانتظار الذكي
+            min_wait = float('inf')
+            all_daily_exhausted = True
+
+            for key in self.api_keys:
+                if key not in self.blocked_keys:
+                    # التحقق إذا كان المفتاح استنفد الحد اليومي
+                    if len(self.rate_limiters[key].daily_requests) < self.rate_limiters[key].max_rpd:
+                        all_daily_exhausted = False
+
+                    wait_time = self.rate_limiters[key].time_until_next_request(estimated_tokens)
+                    if wait_time < min_wait:
+                        min_wait = wait_time
+
+            if all_daily_exhausted:
+                logger.error("تم استنفاد الحد اليومي لجميع المفاتيح! يجب الانتظار لليوم التالي أو إضافة مفاتيح جديدة.")
+                # الانتظار لمدة طويلة ثم المحاولة مجدداً عبر الحلقة (تجنب الاستدعاء المتكرر recursive)
+                await asyncio.sleep(60)
+                continue
+
+            if min_wait < float('inf') and min_wait > 0:
+                logger.info(f"جميع المفاتيح مشغولة حالياً، انتظار ذكي لمدة {min_wait:.1f} ثانية...")
+                await asyncio.sleep(min_wait + 0.5)
                 continue
             
-            # التحقق من rate limit (RPM, TPM, RPD)
-            if not self.rate_limiters[key].can_make_request(estimated_tokens):
-                continue
-            
-            # التحقق من صحة المفتاح
-            health_score = self.key_stats[key].get_health_score()
-            if health_score < 10:  # مفتاح غير صحي
-                continue
-            
-            available_keys.append((key, health_score))
-        
-        if not available_keys:
-            # إذا فشلت كل المحاولات والمفاتيح محظورة أو مشغولة، نقوم بتغيير الـ IP
-            logger.warning("جميع المفاتيح وصلت للحد الأقصى أو محظورة. جاري تدوير الـ IP عبر Tor لتخطي الحظر...")
-            
-            # نطلب IP جديد
-            success = self.tor_manager.request_new_ip()
-            if success:
-                # التحقق والتأكيد
-                await self.tor_manager.verify_connection()
-                # إعادة إنشاء الجلسة حتى لا نستخدم اتصالات قديمة
-                await self._ensure_session(force_new=True)
-
-                # بعد تغيير الـ IP، نقوم بتصفير حظر المفاتيح جزئياً لنحاول مرة أخرى
-                logger.info("تم تصفير حظر المفاتيح للبدء من جديد مع الـ IP الجديد.")
-                self.blocked_keys.clear()
-
-                # ننتظر قليلاً لضمان الاستقرار
-                await asyncio.sleep(2)
-                return await self.get_optimal_api_key(estimated_tokens)
-            else:
-                # إذا فشل Tor في تغيير الـ IP نعود للانتظار التقليدي
-                min_wait = float('inf')
-                for key in self.api_keys:
-                    if key not in self.blocked_keys:
-                        wait_time = self.rate_limiters[key].time_until_next_request(estimated_tokens)
-                        min_wait = min(min_wait, wait_time)
-
-                if min_wait < float('inf') and min_wait > 0:
-                    logger.warning(f"الانتظار المقدر: {min_wait:.1f} ثانية...")
-                    await asyncio.sleep(min_wait + 0.5)
-                    return await self.get_optimal_api_key(estimated_tokens)
-
-                logger.warning("جميع المفاتيح محظورة بالكامل وتغيير IP فشل. انتظار 15 ثانية...")
-                await asyncio.sleep(15)
-                self.blocked_keys.clear()
-                return await self.get_optimal_api_key(estimated_tokens)
-        
-        # اختيار المفتاح الأفضل صحة وأقل استخداماً لتحقيق توازن (Round-Robin)
-        available_keys.sort(key=lambda x: (x[1], -self.key_stats[x[0]].total_requests), reverse=True)
-        best_key = available_keys[0][0]
-        
-        return best_key
+            # إذا فشلت كل المحاولات، أعد تعيين المفاتيح المحظورة وانتظر
+            logger.warning("جميع المفاتيح محظورة، انتظار...")
+            await asyncio.sleep(15)
+            self.blocked_keys.clear()
+            # Loop will continue
     
     async def make_precision_request(self, prompt: str, system_instruction: str = "", 
                                    temperature: float = 0.05, max_tokens: int = 8192,
                                    request_type: str = "translation") -> Optional[str]:
-        """إرسال طلب دقيق مع إعدادات محسنة وتتبع دقيق للـ Tokens"""
+        """إرسال طلب دقيق مع إعدادات محسنة"""
         
         # التأكد من وجود جلسة نشطة
         await self._ensure_session()
         
-        # تقدير عدد الـ Tokens قبل إرسال الطلب (System + Prompt)
-        estimated_tokens = TokenEstimator.estimate_tokens(prompt + system_instruction)
-        logger.debug(f"[{request_type}] Tokens مقدرة للطلب: {estimated_tokens}")
+        # تقدير عدد التوكنز للطلب والإجابة المتوقعة
+        estimated_input_tokens = self.estimate_tokens(prompt + system_instruction)
+        estimated_output_tokens = min(max_tokens, estimated_input_tokens * 2) # افتراض أقصى
+        total_estimated_tokens = estimated_input_tokens + estimated_output_tokens
 
         for attempt in range(self.max_retries):
-            api_key = await self.get_optimal_api_key(estimated_tokens)
+            api_key = await self.get_optimal_api_key(total_estimated_tokens)
             if not api_key:
-                logger.error("لا توجد مفاتيح API متاحة أو كافية لتلبية هذا الطلب")
+                logger.error("لا توجد مفاتيح API متاحة")
                 return None
             
-            # تسجيل الطلب بالتوكنز المقدرة لخصمها من حصة المفتاح (TPM)
-            self.rate_limiters[api_key].add_request(estimated_tokens)
+            # تسجيل الطلب والتوكنز المقدرة
+            self.rate_limiters[api_key].add_request(total_estimated_tokens)
             request_start = time.time()
             
             headers = {
@@ -643,21 +459,14 @@ class EnhancedGeminiAPI:
                             logger.warning(f"استجابة غير متوقعة من Gemini: {result}")
                             self.key_stats[api_key].record_failure("invalid_response")
                             
-                    elif response.status in [429, 403]:
-                        logger.warning(f"خطأ {response.status} (تجاوز/حظر) للمفتاح {api_key[:10]}...")
-                        self.key_stats[api_key].record_failure("rate_limit" if response.status == 429 else "forbidden")
+                    elif response.status == 429:
+                        logger.warning(f"تجاوز حد المعدل للمفتاح {api_key[:10]}... انتظار")
+                        self.key_stats[api_key].record_failure("rate_limit")
                         
                         # حظر المفتاح مؤقتاً
                         block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
                         self.blocked_keys[api_key] = time.time() + block_duration
                         
-                        # ميزة ذكية: إذا واجهنا 429 أكثر من مرة متتالية، ربما IP تم حظره.
-                        # سنقوم بتغيير الـ IP فوراً إذا استنفدنا نصف المحاولات
-                        if attempt >= self.max_retries // 2:
-                            logger.info("اكتشاف حظر متكرر. جاري تبديل عنوان الـ IP عبر Tor بشكل استباقي...")
-                            if self.tor_manager.request_new_ip():
-                                await self._ensure_session(force_new=True)
-
                         await asyncio.sleep(block_duration)
                         
                     elif response.status >= 500:
