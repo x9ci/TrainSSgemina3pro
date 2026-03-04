@@ -14,7 +14,7 @@ import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
-import PyPDF2
+import fitz  # PyMuPDF
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1046,155 +1046,145 @@ class CompleteTranslationEngine:
 
 
 class ProfessionalDocumentProcessor:
-    """معالج المستندات الاحترافي المحسن"""
+    """معالج المستندات الاحترافي المحسن باستخدام PyMuPDF للتقسيم الذكي حسب الحجم"""
 
     @staticmethod
-    def smart_text_division(text: str, target_chunk_size: int = 5000) -> List[Dict[str, Any]]:
-        """تقسيم ذكي للنص إلى أجزاء منطقية مع حفظ التماسك"""
+    def find_safe_split_index(text: str, max_words: int) -> int:
+        """
+        يبحث عن نقطة آمنة للتقسيم بحيث لا يتجاوز الحد الأقصى للكلمات (max_words).
+        يبحث بشكل عكسي من النهاية المحتملة عن فاصلة مزدوجة (فقرة) أو نهاية جملة (. ! ?)
+        لتجنب قطع المحادثات والجمل، مع الحفاظ على الفهارس الأصلية للنص.
+        """
+        matches = list(re.finditer(r'\S+', text))
         
-        # تقسيم إلى فقرات
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        if len(matches) <= max_words:
+            return len(text)
+
+        # نأخذ النص الأصلي حتى نهاية الكلمة المطلوبة بالضبط
+        tentative_end_index = matches[max_words - 1].end()
+        tentative_text = text[:tentative_end_index]
         
-        chapters = []
-        current_chapter = {
-            'id': 'chapter_001',
-            'title': 'الجزء الأول',
-            'content': '',
-            'word_count': 0,
-            'start_page': 1,
-            'end_page': 1
-        }
-        
-        chapter_counter = 1
-        
-        for paragraph in paragraphs:
-            paragraph_words = len(paragraph.split())
+        # الأولوية الأولى: فاصل فقرة مزدوج (\n\n)
+        paragraph_break = tentative_text.rfind('\n\n')
+        if paragraph_break != -1 and paragraph_break > len(tentative_text) * 0.5:
+            return paragraph_break + 2 # تضمين الفراغ المزدوج
             
-            # إذا إضافة الفقرة ستتجاوز الحد
-            if (current_chapter['word_count'] + paragraph_words > target_chunk_size 
-                and current_chapter['content'].strip()):
+        # الأولوية الثانية: نهايات الجمل المنطقية
+        safe_punctuation = ['. ', '! ', '? ', '." ', '!" ', '?" ', '.\n', '!\n', '?\n']
+        best_break = -1
+
+        for punc in safe_punctuation:
+            idx = tentative_text.rfind(punc)
+            if idx > best_break:
+                best_break = idx + len(punc)
                 
-                chapters.append(current_chapter)
-                chapter_counter += 1
-                
-                current_chapter = {
-                    'id': f'chapter_{chapter_counter:03d}',
-                    'title': f'الجزء {chapter_counter}',
-                    'content': paragraph,
-                    'word_count': paragraph_words,
-                    'start_page': chapter_counter,
-                    'end_page': chapter_counter
-                }
-            else:
-                if current_chapter['content']:
-                    current_chapter['content'] += '\n\n' + paragraph
-                else:
-                    current_chapter['content'] = paragraph
-                current_chapter['word_count'] += paragraph_words
+        # إذا وجدنا نهاية جملة في النصف الأخير من النص المحتمل
+        if best_break != -1 and best_break > len(tentative_text) * 0.5:
+            return best_break
+
+        # الأولوية الثالثة: فاصل فقرة واحد (\n)
+        single_break = tentative_text.rfind('\n')
+        if single_break != -1 and single_break > len(tentative_text) * 0.5:
+            return single_break + 1
+
+        # كملاذ أخير: العودة لأقرب مسافة
+        space_break = tentative_text.rfind(' ')
+        if space_break != -1:
+            return space_break + 1
+
+        return tentative_end_index
+
+    @staticmethod
+    def smart_text_division(text: str, target_chunk_size: int = 4000) -> List[Dict[str, Any]]:
+        """تقسيم ذكي للنص يعتمد على الحجم الآمن دون قطع المعنى"""
         
-        # إضافة الفصل الأخير
-        if current_chapter['content'].strip():
-            chapters.append(current_chapter)
+        chunks = []
+        chunk_counter = 1
+        current_index = 0
+        total_len = len(text)
         
-        return chapters
+        while current_index < total_len:
+            remaining_text = text[current_index:]
+
+            # إيجاد أفضل مكان للقطع
+            split_offset = ProfessionalDocumentProcessor.find_safe_split_index(remaining_text, target_chunk_size)
+
+            chunk_content = remaining_text[:split_offset].strip()
+
+            if chunk_content:
+                chunks.append({
+                    'id': f'chunk_{chunk_counter:04d}',
+                    'title': f'الجزء {chunk_counter}',  # داخلي فقط
+                    'content': chunk_content,
+                    'word_count': len(chunk_content.split()),
+                    'start_page': chunk_counter, # يتم حسابها كترتيب
+                    'end_page': chunk_counter
+                })
+                chunk_counter += 1
+
+            current_index += split_offset
+
+        return chunks
 
     @staticmethod
     def extract_pdf_with_precision(file_path: str) -> Dict[str, Any]:
-        """استخراج دقيق للنص مع الحفاظ على البنية"""
+        """استخراج دقيق للنص باستخدام PyMuPDF (fitz) والتقسيم الذكي"""
         
-        logger.info(f"بدء معالجة ملف PDF: {file_path}")
+        logger.info(f"بدء معالجة ملف PDF باستخدام PyMuPDF: {file_path}")
         
         try:
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                
-                document_info = {
-                    'title': '',
-                    'author': '',
-                    'chapters': [],
-                    'total_pages': len(pdf_reader.pages),
-                    'metadata': {}
-                }
-                
-                # استخراج البيانات الوصفية
-                if pdf_reader.metadata:
-                    document_info['metadata'] = dict(pdf_reader.metadata)
-                    document_info['title'] = pdf_reader.metadata.get('/Title', '')
-                    document_info['author'] = pdf_reader.metadata.get('/Author', '')
-                
-                full_text = ""
-                current_chapter = None
-                chapter_counter = 1
-                
-                for page_num, page in enumerate(pdf_reader.pages):
-                    try:
-                        page_text = page.extract_text()
-                        if not page_text or len(page_text.strip()) < 10:
-                            continue
-                        
+            doc = fitz.open(file_path)
+
+            document_info = {
+                'title': doc.metadata.get('title', ''),
+                'author': doc.metadata.get('author', ''),
+                'chapters': [],
+                'total_pages': len(doc),
+                'metadata': doc.metadata
+            }
+
+            full_text = ""
+
+            for page_num in range(len(doc)):
+                try:
+                    page = doc.load_page(page_num)
+                    # استخراج النص بـ blocks للحفاظ على بنية الفقرات بشكل أفضل
+                    blocks = page.get_text("blocks")
+
+                    page_text = ""
+                    for b in blocks:
+                        # b[4] contains the text of the block
+                        block_text = b[4].strip()
+                        if block_text:
+                            # استبدال المسافات المتعددة والأسطر الداخلية بمسافة واحدة
+                            block_text = re.sub(r'(?<!\n)\n(?!\n)', ' ', block_text)
+                            page_text += block_text + "\n\n"
+
+                    if page_text:
                         # تنظيف النص
                         page_text = ProfessionalDocumentProcessor.clean_extracted_text(page_text)
-                        
-                        # البحث عن عناوين الفصول
-                        chapter_titles = ProfessionalDocumentProcessor.detect_chapter_titles(page_text)
-                        
-                        if chapter_titles:
-                            # حفظ الفصل السابق
-                            if current_chapter:
-                                document_info['chapters'].append(current_chapter)
-                            
-                            # بدء فصل جديد
-                            for title in chapter_titles:
-                                current_chapter = {
-                                    'id': f'chapter_{chapter_counter:03d}',
-                                    'title': title,
-                                    'content': page_text,
-                                    'start_page': page_num + 1,
-                                    'end_page': page_num + 1,
-                                    'word_count': len(page_text.split())
-                                }
-                                chapter_counter += 1
-                                break
-                        else:
-                            # إضافة للفصل الحالي
-                            if current_chapter:
-                                current_chapter['content'] += "\n\n" + page_text
-                                current_chapter['end_page'] = page_num + 1
-                                current_chapter['word_count'] = len(current_chapter['content'].split())
-                            else:
-                                # إنشاء فصل افتراضي
-                                current_chapter = {
-                                    'id': f'chapter_{chapter_counter:03d}',
-                                    'title': f'الجزء {chapter_counter}',
-                                    'content': page_text,
-                                    'start_page': page_num + 1,
-                                    'end_page': page_num + 1,
-                                    'word_count': len(page_text.split())
-                                }
-                                chapter_counter += 1
-                        
                         full_text += page_text + "\n\n"
                         
-                    except Exception as e:
-                        logger.warning(f"خطأ في معالجة الصفحة {page_num + 1}: {str(e)}")
-                        continue
-                
-                # إضافة الفصل الأخير
-                if current_chapter:
-                    document_info['chapters'].append(current_chapter)
-                
-                # إذا لم توجد فصول، تقسيم ذكي
-                if not document_info['chapters']:
-                    document_info['chapters'] = ProfessionalDocumentProcessor.smart_text_division(full_text)
-                
-                logger.info(f"تم استخراج {len(document_info['chapters'])} فصل من {document_info['total_pages']} صفحة")
-                
-                # إحصائيات
-                total_words = sum(ch['word_count'] for ch in document_info['chapters'])
-                logger.info(f"إجمالي الكلمات: {total_words:,}")
-                
-                return document_info
-                
+                except Exception as e:
+                    logger.warning(f"خطأ في معالجة الصفحة {page_num + 1}: {str(e)}")
+                    continue
+
+            doc.close()
+
+            # تنظيف النص الكلي
+            full_text = re.sub(r'\n{3,}', '\n\n', full_text)
+
+            # تقسيم ذكي بالاعتماد الكلي على الحجم للحفاظ على التماسك وعدم القطع
+            document_info['chapters'] = ProfessionalDocumentProcessor.smart_text_division(full_text, target_chunk_size=3500)
+
+            logger.info(f"تم استخراج {len(document_info['chapters'])} جزء بمتوسط 3500 كلمة من {document_info['total_pages']} صفحة")
+
+            # إحصائيات
+            total_words = sum(ch['word_count'] for ch in document_info['chapters'])
+            logger.info(f"إجمالي الكلمات: {total_words:,}")
+
+            return document_info
+
         except Exception as e:
             logger.error(f"خطأ في قراءة ملف PDF: {str(e)}")
             raise
@@ -1203,148 +1193,43 @@ class ProfessionalDocumentProcessor:
     def clean_extracted_text(text: str) -> str:
         """تنظيف النص المستخرج من PDF"""
         
-        # إزالة الأسطر المكررة
-        lines = text.split('\n')
-        cleaned_lines = []
+        # إزالة المسافات المتعددة
+        text = re.sub(r'[ \t]+', ' ', text)
         
-        for line in lines:
-            line = line.strip()
-            if line and len(line) > 2:  # تجنب الأسطر الفارغة أو القصيرة جداً
-                cleaned_lines.append(line)
+        # التأكد من أن الفقرات مفصولة بشكل صحيح \n\n
+        text = re.sub(r'\n\s*\n', '\n\n', text)
         
-        # دمج الأسطر المقطعة
-        merged_text = ""
-        for i, line in enumerate(cleaned_lines):
-            if i > 0 and not line[0].isupper() and not cleaned_lines[i-1].endswith('.'):
-                merged_text += " " + line
-            else:
-                merged_text += "\n\n" + line if merged_text else line
+        # معالجة الكلمات المقطوعة في نهاية السطر بعلامة '-' (Hyphenation)
+        text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
         
-        # تنظيف إضافي
-        merged_text = re.sub(r'\n{3,}', '\n\n', merged_text)  # إزالة الأسطر الفارغة الزائدة
-        merged_text = re.sub(r' {2,}', ' ', merged_text)      # إزالة المسافات الزائدة
+        # دمج الأسطر التي تنتهي بمسافة أو فاصلة وتستمر في السطر التالي كجملة واحدة
+        # نتجنب دمج الأسطر إذا كانت متبوعة بـ \n\n
+        lines = text.split('\n\n')
+        cleaned_paragraphs = []
+        
+        for p in lines:
+            p = p.strip()
+            if p:
+                # دمج الأسطر الداخلية في الفقرة
+                p = re.sub(r'\n', ' ', p)
+                cleaned_paragraphs.append(p)
+
+        merged_text = '\n\n'.join(cleaned_paragraphs)
         
         return merged_text.strip()
-    
-    @staticmethod
-    def detect_chapter_titles(text: str) -> List[str]:
-        """كشف عناوين الفصول"""
-        
-        lines = text.split('\n')
-        chapter_titles = []
-        
-        # أنماط عناوين الفصول
-        chapter_patterns = [
-            r'^(Chapter|CHAPTER)\s+(\d+|[IVX]+)[\:\.\-\s]*(.*)',
-            r'^(الفصل|فصل)\s+(\d+|[ا-ي]+)[\:\.\-\s]*(.*)',
-            r'^\s*(\d+)[\.\-\s](.{5,50})',
-            r'^\s*([IVX]+)[\.\-\s](.{5,50})',
-            r'^([A-Z][A-Z\s]{10,80})',  # عناوين بأحرف كبيرة
-        ]
-        
-        for line in lines:
-            line = line.strip()
-            if len(line) < 3 or len(line) > 100:
-                continue
-            
-            for pattern in chapter_patterns:
-                match = re.match(pattern, line, re.IGNORECASE)
-                if match:
-                    chapter_titles.append(line)
-                    break
-        
-        return chapter_titles
 
 
 class EnhancedDocumentGenerator:
-    """مولد المستندات المحسن للروايات مع الفهرس"""
+    """مولد المستندات المحسن للروايات بنص متصل وملتحم بالكامل (بدون فهرس أو أجزاء)"""
     
     @staticmethod
-    async def create_table_of_contents(chapters: List[Dict[str, Any]], 
-                                     api_manager: EnhancedGeminiAPI) -> List[Dict[str, str]]:
-        """إنشاء فهرس منظم بدون تكرار وترجمة واحدة لكل عنوان"""
-        logger.info("إنشاء فهرس منظم بدون تكرار...")
-        
-        table_of_contents = []
-        processed_titles = set()  # لمنع التكرار
-        used_translations = set()  # لمنع تكرار الترجمات
-        
-        for i, chapter in enumerate(chapters):
-            if not chapter.get('translated_content'):
-                continue
-                
-            original_title = chapter['title']
-            
-            # تجنب تكرار نفس العنوان الأصلي
-            if original_title in processed_titles:
-                continue
-            
-            processed_titles.add(original_title)
-            
-            # البحث عن عنوان حقيقي في النص المترجم
-            lines = chapter['translated_content'].split('\n')[:10]  # أول 10 أسطر فقط
-            chapter_title_found = None
-            
-            for line in lines:
-                line = line.strip()
-                # البحث عن عنوان مناسب (ليس طويل جداً وليس قصير جداً)
-                if (len(line) > 5 and len(line) < 60 and 
-                    not line.startswith('في') and not line.startswith('كان') and
-                    not line.startswith('لقد') and not line.startswith('عندما')):
-                    # تجنب تكرار نفس الترجمة
-                    if line not in used_translations:
-                        chapter_title_found = line
-                        used_translations.add(line)
-                        break
-            
-            # إذا لم يتم العثور على عنوان مناسب، ترجم العنوان الأصلي
-            if not chapter_title_found:
-                if not original_title.startswith('الجزء') and not original_title.lower().startswith('chapter'):
-                    translation_prompt = f"""اترجم عنوان الفصل التالي إلى العربية بشكل مختصر ومميز:
-
-{original_title}
-
-عنوان مترجم مميز (٣-٨ كلمات فقط):"""
-                    
-                    translated_title = await api_manager.make_precision_request(
-                        translation_prompt,
-                        temperature=0.2,
-                        request_type="chapter_title_translation"
-                    )
-                    
-                    if translated_title:
-                        clean_title = translated_title.strip()[:50]
-                        # تجنب تكرار نفس الترجمة
-                        if clean_title not in used_translations:
-                            arabic_title = clean_title
-                            used_translations.add(clean_title)
-                        else:
-                            arabic_title = f"الفصل {len(table_of_contents) + 1}"
-                    else:
-                        arabic_title = f"الفصل {len(table_of_contents) + 1}"
-                else:
-                    arabic_title = f"الفصل {len(table_of_contents) + 1}"
-            else:
-                arabic_title = chapter_title_found
-            
-            table_of_contents.append({
-                'original_title': original_title,
-                'arabic_title': arabic_title
-            })
-        
-        logger.info(f"تم إنشاء فهرس بدون تكرار يحتوي على {len(table_of_contents)} عنوان فريد")
-        
-        return table_of_contents
-    
-    @staticmethod
-    def create_novel_document(chapters: List[Dict[str, Any]], 
+    def create_novel_document(chunks: List[Dict[str, Any]],
                             output_path: str,
                             book_title: str = "الرواية المترجمة",
-                            author: str = "مترجم بالذكاء الاصطناعي",
-                            table_of_contents: List[Dict[str, str]] = None) -> str:
-        """إنشاء مستند رواية احترافي مع فهرس في صفحة منفصلة وأحجام خط محددة"""
+                            author: str = "مترجم بالذكاء الاصطناعي") -> str:
+        """إنشاء مستند رواية احترافي كنص واحد متصل ومستمر بدون أي فواصل مرئية للأجزاء"""
         
-        logger.info(f"إنشاء مستند الرواية مع فهرس منفصل: {output_path}")
+        logger.info(f"إنشاء مستند الرواية كنص متصل: {output_path}")
         
         try:
             # إنشاء مجلد الإخراج إذا لم يكن موجوداً
@@ -1388,17 +1273,6 @@ class EnhancedDocumentGenerator:
                 novel_title_style.paragraph_format.space_after = Pt(10)  # مسافة صغيرة
                 novel_title_style.paragraph_format.space_before = Pt(0)
             
-            # نمط عنوان الفصل - حجم 15pt مع مساحات محسنة
-            if 'ChapterTitle' not in styles:
-                chapter_title_style = styles.add_style('ChapterTitle', WD_STYLE_TYPE.PARAGRAPH)
-                chapter_title_style.font.name = 'Arial'
-                chapter_title_style.font.rtl = True
-                chapter_title_style.font.size = Pt(15)  # حجم عناوين الفصول 15pt
-                chapter_title_style.font.bold = True
-                chapter_title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                chapter_title_style.paragraph_format.space_before = Pt(12)  # مسافة قبل العنوان
-                chapter_title_style.paragraph_format.space_after = Pt(8)    # مسافة بعد العنوان
-            
             # نمط النص الأساسي - 14pt مع تحسين استغلال المساحة
             if 'NovelText' not in styles:
                 novel_text_style = styles.add_style('NovelText', WD_STYLE_TYPE.PARAGRAPH)
@@ -1414,28 +1288,6 @@ class EnhancedDocumentGenerator:
                 novel_text_style.paragraph_format.widow_control = True   # منع الأسطر الوحيدة
                 novel_text_style.paragraph_format.keep_together = False  # السماح بتقسيم الفقرات
             
-            # نمط الفهرس - عنوان الفهرس محسن
-            if 'TOCTitle' not in styles:
-                toc_title_style = styles.add_style('TOCTitle', WD_STYLE_TYPE.PARAGRAPH)
-                toc_title_style.font.name = 'Arial'
-                toc_title_style.font.rtl = True
-                toc_title_style.font.size = Pt(16)
-                toc_title_style.font.bold = True
-                toc_title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                toc_title_style.paragraph_format.space_after = Pt(15)  # مسافة محسنة
-                toc_title_style.paragraph_format.space_before = Pt(0)
-            
-            # نمط عناصر الفهرس - استغلال أمثل للمساحة
-            if 'TOCEntry' not in styles:
-                toc_entry_style = styles.add_style('TOCEntry', WD_STYLE_TYPE.PARAGRAPH)
-                toc_entry_style.font.name = 'Arial'
-                toc_entry_style.font.rtl = True
-                toc_entry_style.font.size = Pt(13)  # حجم مناسب لأسماء الفصول
-                toc_entry_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                toc_entry_style.paragraph_format.space_after = Pt(6)    # مسافة محسنة
-                toc_entry_style.paragraph_format.space_before = Pt(0)
-                toc_entry_style.paragraph_format.left_indent = Inches(0.2)  # مسافة بادئة صغيرة
-            
             # صفحة العنوان
             title_paragraph = doc.add_paragraph(book_title, style='NovelTitle')
             
@@ -1446,65 +1298,21 @@ class EnhancedDocumentGenerator:
                 author_paragraph.runs[0].font.rtl = True
                 author_paragraph.paragraph_format.space_after = Pt(5)  # مسافة صغيرة
             
-            # انتقال لصفحة جديدة للفهرس
-            doc.add_page_break()
-            
-            # صفحة الفهرس المنفصلة - احترافية مثل الكتب الحقيقية
-            if table_of_contents:
-                doc.add_paragraph("فهرس المحتويات", style='TOCTitle')
-                
-                # مسافة إضافية قبل بداية الفهرس - محسنة
-                doc.add_paragraph().paragraph_format.space_after = Pt(8)
-                
-                # إضافة عناصر الفهرس بشكل احترافي - أسماء الفصول بالأحرف العربية
-                for i, toc_entry in enumerate(table_of_contents, 1):
-                    # تحويل الرقم إلى كتابة عربية
-                    chapter_number_text = ComprehensiveContentProcessor.number_to_arabic_text(i)
-                    
-                    # تنسيق احترافي: اسم الفصل بالأحرف العربية
-                    toc_line = f"الفصل {chapter_number_text}: {toc_entry['arabic_title']}"
-                    toc_paragraph = doc.add_paragraph(toc_line, style='TOCEntry')
-                    
-                    # إضافة مسافة صغيرة بين الفصول للوضوح - محسنة
-                    toc_paragraph.paragraph_format.space_after = Pt(6)
-            
             # انتقال لصفحة جديدة للمحتوى
             doc.add_page_break()
             
-            # محتوى الرواية النظيف بدون تكرار
-            used_chapter_titles = set()  # لمنع تكرار العناوين
-            
-            for i, chapter in enumerate(chapters):
-                if not chapter.get('translated_content'):
-                    logger.warning(f"تخطي الفصل غير المترجم: {chapter['title']}")
+            # دمج جميع الأجزاء كنص روائي واحد متصل بدون فواصل مرئية أو عناوين أجزاء
+            for chunk in chunks:
+                if not chunk.get('translated_content'):
+                    logger.warning(f"تخطي جزء غير مترجم: {chunk.get('title', 'غير معروف')}")
                     continue
                 
-                # استخدام عنوان فريد من الفهرس
-                chapter_title = None
-                if table_of_contents and i < len(table_of_contents):
-                    potential_title = table_of_contents[i]['arabic_title']
-                    # تجنب تكرار نفس العنوان
-                    if potential_title not in used_chapter_titles:
-                        chapter_title = potential_title
-                        used_chapter_titles.add(chapter_title)
-                
-                # إضافة عنوان الفصل مرة واحدة فقط إذا كان فريداً
-                if chapter_title and not chapter_title.startswith('الجزء'):
-                    doc.add_paragraph(chapter_title, style='ChapterTitle')
-                
-                # معالجة محتوى الفصل بشكل منتظم
-                content = chapter['translated_content']
-                
-                # تقسيم النص وتنظيفه
+                content = chunk['translated_content']
                 paragraphs = content.split('\n\n')
                 
                 for para_text in paragraphs:
                     para_text = para_text.strip()
                     if para_text:
-                        # تنظيف النص من العناوين المكررة
-                        if chapter_title and chapter_title in para_text:
-                            para_text = para_text.replace(chapter_title, '').strip()
-                        
                         clean_text = EnhancedDocumentGenerator.clean_novel_paragraph(para_text)
                         if clean_text and len(clean_text) > 10:  # تجنب النصوص القصيرة
                             doc.add_paragraph(clean_text, style='NovelText')
@@ -1512,10 +1320,9 @@ class EnhancedDocumentGenerator:
             # حفظ المستند
             doc.save(output_path)
             
-            logger.info(f"تم إنشاء مستند الرواية مع تنسيق احترافي محسن بنجاح: {output_path}")
-            logger.info(f"أحجام الخط: النص الأساسي 14pt، العناوين 15pt")
-            logger.info(f"الفهرس: احترافي مع أرقام بالأحرف العربية")
-            logger.info(f"التنسيق: استغلال أمثل للمساحة مثل الروايات الاحترافية")
+            logger.info(f"تم إنشاء مستند الرواية المتصل بنجاح: {output_path}")
+            logger.info(f"أحجام الخط: النص الأساسي 14pt، العنوان 18pt")
+            logger.info(f"التنسيق: نص روائي ملتحم تماماً بدون أي عناوين فصول أو فواصل صفحات بين الأجزاء")
             return output_path
             
         except Exception as e:
@@ -1747,7 +1554,7 @@ class MasterTranslationSystem:
                              f"بدء ترجمة فصل من {chapter['word_count']} كلمة - النوع: {text_analysis['genre']}, النبرة: {text_analysis['tone']}")
             
             # الترجمة الشاملة مع المراجعة
-            translation_context = f"هذا الفصل بعنوان '{chapter['title']}' من رواية أدبية"
+            translation_context = f"هذا جزء من رواية أدبية متصلة."
             
             translated_content = await self.translation_engine.translate_with_comprehensive_review(
                 content, translation_context
@@ -1824,7 +1631,7 @@ class MasterTranslationSystem:
     
     async def process_complete_book(self, pdf_path: str, output_dir: str,
                                   book_title: str = None, author: str = None) -> str:
-        """معالجة كاملة للكتاب من PDF إلى رواية جاهزة للقراءة مع فهرس منفصل"""
+        """معالجة كاملة للكتاب من PDF إلى رواية متصلة جاهزة للقراءة"""
         
         # إنشاء مجلد الإخراج
         output_path_obj = Path(output_dir)
@@ -1835,7 +1642,7 @@ class MasterTranslationSystem:
         output_file = output_path_obj / f"{pdf_name}_رواية_مترجمة.docx"
         
         logger.info("=" * 100)
-        logger.info("بدء المعالجة الشاملة المحسنة للرواية مع الفهرس المنفصل")
+        logger.info("بدء المعالجة الشاملة المحسنة للرواية (نص متصل)")
         logger.info(f"الملف المصدر: {pdf_path}")
         logger.info(f"الملف الهدف: {output_file}")
         logger.info("=" * 100)
@@ -1844,125 +1651,111 @@ class MasterTranslationSystem:
         
         try:
             # المرحلة 1: استخراج وتحليل المستند
-            logger.info("📖 المرحلة 1: استخراج وتحليل المستند...")
+            logger.info("📖 المرحلة 1: استخراج وتحليل المستند بالتقسيم الذكي...")
             document_structure = self.document_processor.extract_pdf_with_precision(pdf_path)
             
-            # تحميل الفصول المكتملة مسبقاً من قاعدة البيانات
+            # تحميل الأجزاء المكتملة مسبقاً من قاعدة البيانات
             previously_completed = self._load_completed_chapters_from_db()
 
-            chapters = document_structure['chapters']
-            self.translation_stats['total_chapters'] = len(chapters)
-            self.translation_stats['total_words'] = sum(ch['word_count'] for ch in chapters)
-            self.translation_stats['total_characters'] = sum(len(ch.get('content', '')) for ch in chapters)
+            chunks = document_structure['chapters']
+            self.translation_stats['total_chapters'] = len(chunks)
+            self.translation_stats['total_words'] = sum(ch['word_count'] for ch in chunks)
+            self.translation_stats['total_characters'] = sum(len(ch.get('content', '')) for ch in chunks)
             
             if not book_title:
                 book_title = document_structure.get('title', 'الرواية المترجمة') or 'الرواية المترجمة'
             if not author:
                 author = document_structure.get('author', 'مؤلف غير محدد') or 'مؤلف غير محدد'
             
-            logger.info(f"📊 تم استخراج {len(chapters)} فصل")
+            logger.info(f"📊 تم استخراج {len(chunks)} جزء")
             logger.info(f"📊 إجمالي الكلمات: {self.translation_stats['total_words']:,}")
             logger.info(f"📊 إجمالي الأحرف: {self.translation_stats['total_characters']:,}")
             logger.info(f"📚 عنوان الكتاب: {book_title}")
             logger.info(f"✍️ المؤلف: {author}")
             
             # المرحلة 2: ترجمة شاملة مع مراجعة متعددة المراحل
-            logger.info("🔄 المرحلة 2: بدء الترجمة الشاملة مع ضمان عدم ترك أي محتوى أجنبي...")
+            logger.info("🔄 المرحلة 2: بدء الترجمة الشاملة مع ضمان التماسك...")
             
-            all_processed_chapters = []
+            all_processed_chunks = []
             
-            for i, chapter in enumerate(chapters):
+            for i, chunk in enumerate(chunks):
                 logger.info("-" * 50)
                 
-                # التحقق من وجود ترجمة سابقة للفصل
-                if chapter['id'] in previously_completed:
-                    logger.info(f"⏭️ تخطي الفصل {i+1}/{len(chapters)}: '{chapter['title']}' (مترجم مسبقاً).")
+                # التحقق من وجود ترجمة سابقة للجزء
+                if chunk['id'] in previously_completed:
+                    logger.info(f"⏭️ تخطي الجزء {i+1}/{len(chunks)}: (مترجم مسبقاً).")
                     
-                    completed_chapter_info = previously_completed[chapter['id']]
-                    all_processed_chapters.append(completed_chapter_info)
+                    completed_chunk_info = previously_completed[chunk['id']]
+                    all_processed_chunks.append(completed_chunk_info)
                     
                     # تحديث الإحصائيات
                     self.translation_stats['skipped_chapters'] += 1
                     self.translation_stats['completed_chapters'] += 1
-                    self.translation_stats['translated_words'] += completed_chapter_info.get('word_count', 0)
+                    self.translation_stats['translated_words'] += completed_chunk_info.get('word_count', 0)
                     continue
 
-                logger.info(f"📝 ترجمة الفصل {i+1}/{len(chapters)}: {chapter['title']}")
-                result = await self.translate_chapter_comprehensively(chapter)
-                all_processed_chapters.append(result)
+                logger.info(f"📝 ترجمة الجزء {i+1}/{len(chunks)}")
+                result = await self.translate_chapter_comprehensively(chunk)
+                all_processed_chunks.append(result)
                 
-                progress = (i + 1) / len(chapters) * 100
+                progress = (i + 1) / len(chunks) * 100
                 elapsed_time = time.time() - self.translation_stats['translation_start_time']
                 
-                chapters_done = i + 1
-                if chapters_done > 0:
-                    avg_time_per_chapter = elapsed_time / chapters_done
-                    remaining_chapters = len(chapters) - chapters_done
-                    estimated_remaining = avg_time_per_chapter * remaining_chapters
+                chunks_done = i + 1
+                if chunks_done > 0:
+                    avg_time_per_chunk = elapsed_time / chunks_done
+                    remaining_chunks = len(chunks) - chunks_done
+                    estimated_remaining = avg_time_per_chunk * remaining_chunks
                     
-                    logger.info(f"📈 التقدم: {progress:.1f}% ({chapters_done}/{len(chapters)})")
+                    logger.info(f"📈 التقدم: {progress:.1f}% ({chunks_done}/{len(chunks)})")
                     logger.info(f"⏰ الوقت المقدر المتبقي: {estimated_remaining/60:.1f} دقيقة")
                     
-                    successful = sum(1 for ch in all_processed_chapters if ch['status'] == 'completed')
+                    successful = sum(1 for ch in all_processed_chunks if ch['status'] == 'completed')
                     if successful > 0:
-                        logger.info(f"✅ الفصول المكتملة: {successful}")
+                        logger.info(f"✅ الأجزاء المكتملة: {successful}")
                         logger.info(f"🔧 تصحيحات المحتوى الأجنبي: {self.translation_stats['foreign_content_corrections']}")
                         logger.info(f"📖 تكيفات سياقية: {self.translation_stats['contextual_adaptations']}")
             
             # المرحلة 3: التحقق النهائي من الجودة
             logger.info("🔍 المرحلة 3: التحقق النهائي من الجودة...")
             
-            successful_chapters = [ch for ch in all_processed_chapters if ch['status'] == 'completed']
-            failed_chapters = [ch for ch in all_processed_chapters if ch['status'] in ['failed', 'error']]
+            successful_chunks = [ch for ch in all_processed_chunks if ch['status'] == 'completed']
+            failed_chunks = [ch for ch in all_processed_chunks if ch['status'] in ['failed', 'error']]
             
-            if failed_chapters:
-                logger.warning(f"⚠️  {len(failed_chapters)} فصل فشل في الترجمة:")
-                for ch in failed_chapters:
-                    logger.warning(f"   - {ch['title']}")
+            if failed_chunks:
+                logger.warning(f"⚠️  {len(failed_chunks)} جزء فشل في الترجمة.")
             
-            chapters_with_foreign = [ch for ch in successful_chapters if ch.get('foreign_content_detected', False)]
-            if chapters_with_foreign:
-                quality_logger.warning(f"تم تطبيق تصحيحات على المحتوى الأجنبي في {len(chapters_with_foreign)} فصل")
+            chunks_with_foreign = [ch for ch in successful_chunks if ch.get('foreign_content_detected', False)]
+            if chunks_with_foreign:
+                quality_logger.warning(f"تم تطبيق تصحيحات على المحتوى الأجنبي في {len(chunks_with_foreign)} جزء")
             else:
-                quality_logger.info("جميع الفصول خالية من المحتوى الأجنبي")
+                quality_logger.info("جميع الأجزاء خالية من المحتوى الأجنبي")
             
-            # المرحلة 4: إنشاء فهرس منظم بدون تكرار
-            logger.info("📋 المرحلة 4: إنشاء فهرس منظم بدون تكرار...")
-            
-            table_of_contents = await self.document_generator.create_table_of_contents(
-                successful_chapters, self.api_manager
-            )
-            
-            logger.info(f"تم إنشاء فهرس احترافي بدون أرقام صفحات يحتوي على {len(table_of_contents)} عنوان فريد")
-            
-            # المرحلة 5: إنشاء مستند الرواية النهائي مع الفهرس المنفصل
-            logger.info("📝 المرحلة 5: إنشاء مستند الرواية النهائي مع التنسيق الاحترافي...")
-            logger.info("🎯 أحجام الخط: النص الأساسي 14pt، العناوين 15pt فقط")
-            logger.info("📄 الفهرس: احترافي بأرقام عربية مكتوبة")
-            logger.info("📐 التنسيق: استغلال أمثل للمساحة مثل الروايات المطبوعة")
+            # المرحلة 4: إنشاء مستند الرواية النهائي (متصل)
+            logger.info("📝 المرحلة 4: تجميع الأجزاء وإنشاء مستند الرواية المتصل...")
             
             final_document_path = self.document_generator.create_novel_document(
-                successful_chapters, str(output_file), book_title, author, table_of_contents
+                successful_chunks, str(output_file), book_title, author
             )
             
-            # المرحلة 6: تجميع الإحصائيات النهائية
+            # المرحلة 5: تجميع الإحصائيات النهائية
             total_time = time.time() - self.translation_stats['translation_start_time']
-            total_successful = len(successful_chapters)
-            total_failed = len(failed_chapters)
+            total_successful = len(successful_chunks)
+            total_failed = len(failed_chunks)
             
-            translated_words = sum(ch.get('word_count', 0) for ch in successful_chapters)
+            translated_words = sum(ch.get('word_count', 0) for ch in successful_chunks)
             words_per_minute = translated_words / (total_time / 60) if total_time > 0 else 0
             
             # تقرير نهائي شامل
             logger.info("=" * 100)
-            logger.info("🎉 تمت معالجة الرواية بنجاح مع الفهرس المنفصل!")
+            logger.info("🎉 تمت معالجة الرواية بنجاح وتم تجميعها كنص متصل!")
             logger.info("=" * 100)
             logger.info(f"📖 عنوان الرواية: {book_title}")
             logger.info(f"✍️  المؤلف: {author}")
-            logger.info(f"📄 إجمالي الفصول: {len(chapters)}")
-            logger.info(f"✅ فصول مترجمة بنجاح: {total_successful}")
-            logger.info(f"⏭️ فصول تم تخطيها (مترجمة سابقاً): {self.translation_stats['skipped_chapters']}")
-            logger.info(f"❌ فصول فاشلة: {total_failed}")
+            logger.info(f"📄 إجمالي الأجزاء: {len(chunks)}")
+            logger.info(f"✅ أجزاء مترجمة بنجاح: {total_successful}")
+            logger.info(f"⏭️ أجزاء تم تخطيها (مترجمة سابقاً): {self.translation_stats['skipped_chapters']}")
+            logger.info(f"❌ أجزاء فاشلة: {total_failed}")
             logger.info(f"📊 إجمالي الكلمات المترجمة: {translated_words:,}")
             logger.info(f"⏱️  إجمالي الوقت: {total_time/60:.1f} دقيقة")
             logger.info(f"🚀 معدل الترجمة: {words_per_minute:.0f} كلمة/دقيقة")
@@ -1974,11 +1767,10 @@ class MasterTranslationSystem:
             logger.info(f"   📖 تكيفات سياقية (نوع ونبرة): {self.translation_stats['contextual_adaptations']}")
             logger.info(f"   🔑 مفاتيح API متعددة: {len(self.api_manager.api_keys)} مفاتيح")
             logger.info(f"   📚 مصطلحات محفوظة: {len(self.translation_engine.terminology_database)} مصطلح")
-            logger.info(f"   📋 فهرس احترافي: {len(table_of_contents)} فصل بأرقام عربية مكتوبة")
-            logger.info(f"   🎯 أحجام الخط موحدة: النص 14pt، العناوين 15pt فقط")
-            logger.info(f"   📐 تنسيق محسن: استغلال أمثل للمساحة، مسافات مدروسة")
+            logger.info(f"   🎯 أحجام الخط موحدة: النص 14pt، العناوين 18pt فقط")
+            logger.info(f"   📐 تنسيق متصل: نص روائي ملتحم بالكامل")
             
-            logger.info(f"📁 الرواية النهائية مع التنسيق الاحترافي: {final_document_path}")
+            logger.info(f"📁 الرواية النهائية (متصلة): {final_document_path}")
             logger.info("=" * 100)
             
             quality_logger.info("تقرير الجودة النهائي:")
@@ -2030,9 +1822,9 @@ def validate_input_paths(input_path: str, output_dir: str) -> Tuple[bool, str]:
 
 
 async def main():
-    """الدالة الرئيسية للنظام المحسن مع الفهرس المنفصل"""
+    """الدالة الرئيسية للنظام المحسن للنص المتصل"""
     
-    print("🚀 نظام الترجمة الشامل المحسن - للروايات والنصوص الأدبية مع الفهرس المنفصل")
+    print("🚀 نظام الترجمة الشامل المحسن - للروايات والنصوص الأدبية (نص متصل وملتحم)")
     print("=" * 90)
     print("✨ المميزات المحسنة:")
     print("   🔑 مفاتيح API متعددة لضمان الاستمرارية")
@@ -2041,10 +1833,10 @@ async def main():
     print("   🎭 تكيف مع الأنواع الأدبية (شعر، حوار، سرد، نثر)")
     print("   💫 تكيف مع النبرات العاطفية (حزين، مفرح، درامي، محايد)")
     print("   📚 حفظ وإدارة ذكية للمصطلحات")
-    print("   📋 إنشاء فهرس احترافي مثل الكتب الحقيقية - أسماء الفصول فقط!")
-    print("   📄 إخراج نهائي للروايات - فهرس احترافي + نص منظم")
-    print("   🎯 أحجام خط محددة: النص 14pt، العناوين 15pt")
+    print("   📄 إخراج نهائي للروايات - نص متصل ومستمر تماماً")
+    print("   🎯 أحجام خط محددة: النص 14pt، العناوين 18pt")
     print("   🔍 مراجعة متعددة المراحل لضمان أعلى جودة")
+    print("   🧠 تقسيم واستخراج ذكي يمنع قطع المحادثات والجمل")
     print("=" * 90)
     
     # إنشاء النظام المحسن
@@ -2078,13 +1870,13 @@ async def main():
         author = None
     
     try:
-        print("\n🔄 بدء عملية الترجمة الشاملة المحسنة مع الفهرس المنفصل...")
+        print("\n🔄 بدء عملية الترجمة الشاملة المحسنة (نص متصل)...")
         print("🌟 النظام المحسن يضمن:")
         print("   • ترجمة كل كلمة وحرف ورقم في النص")
         print("   • تكيف سياقي حسب نوع النص العاطفي")
         print("   • إزالة تامة لأي محتوى أجنبي")
-        print("   • إنشاء فهرس احترافي مثل الكتب - أسماء الفصول فقط")
-        print("   • أحجام خط محددة: النص 14pt، العناوين 15pt")
+        print("   • نص روائي متصل وملتحم بدون فواصل مرئية")
+        print("   • أحجام خط محددة: النص 14pt، العناوين 18pt")
         print("   • إخراج رواية نظيفة جاهزة للقراءة")
         print("-" * 90)
         
@@ -2093,12 +1885,10 @@ async def main():
             input_path, output_dir, book_title, author
         )
         
-        print(f"\n🎉 تم إنشاء الرواية المترجمة مع الفهرس الاحترافي بنجاح!")
+        print(f"\n🎉 تم إنشاء الرواية المترجمة كنص متصل وملتحم بنجاح!")
         print(f"📄 الرواية النهائية: {final_document}")
-        print(f"📋 الرواية تحتوي على فهرس احترافي مثل الكتب الحقيقية!")
-        print(f"🚫 الفهرس: أسماء الفصول فقط بدون أرقام صفحات!")
-        print(f"🎯 أحجام الخط: النص الأساسي 14pt، العناوين 15pt فقط!")
-        print(f"📐 التنسيق: استغلال أمثل للمساحة مثل الروايات المطبوعة!")
+        print(f"🎯 أحجام الخط: النص الأساسي 14pt، العناوين 18pt فقط!")
+        print(f"📐 التنسيق: نص روائي متصل بالكامل بدون فواصل بين الأجزاء المترجمة!")
         
         # عرض ملخص الإنجازات
         if system.translation_stats['foreign_content_corrections'] > 0:
