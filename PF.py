@@ -14,7 +14,7 @@ import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
-import PyPDF2
+import fitz
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1050,153 +1050,169 @@ class ProfessionalDocumentProcessor:
 
     @staticmethod
     def smart_text_division(text: str, target_chunk_size: int = 5000) -> List[Dict[str, Any]]:
-        """تقسيم ذكي للنص إلى أجزاء منطقية مع حفظ التماسك"""
-        
-        # تقسيم إلى فقرات
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        """تقسيم ذكي متقدم للنص مع ضمان عدم قطع الحوارات أو الجمل"""
         
         chapters = []
-        current_chapter = {
-            'id': 'chapter_001',
-            'title': 'الجزء الأول',
-            'content': '',
-            'word_count': 0,
-            'start_page': 1,
-            'end_page': 1
-        }
-        
         chapter_counter = 1
+        current_idx = 0
+        total_length = len(text)
         
-        for paragraph in paragraphs:
-            paragraph_words = len(paragraph.split())
+        while current_idx < total_length:
+            # تقدير مبدئي لطول الجزء بناءً على الحروف (متوسط طول الكلمة 5 + مسافة = 6 حروف)
+            # نأخذ حجم أكبر قليلاً للسماح بالتراجع للخلف للعثور على نقطة قطع آمنة
+            target_chars = target_chunk_size * 6
             
-            # إذا إضافة الفقرة ستتجاوز الحد
-            if (current_chapter['word_count'] + paragraph_words > target_chunk_size 
-                and current_chapter['content'].strip()):
-                
-                chapters.append(current_chapter)
-                chapter_counter += 1
-                
-                current_chapter = {
+            # إذا كان المتبقي أقل من الحجم المستهدف، نأخذه بالكامل
+            if current_idx + target_chars >= total_length:
+                chunk_text = text[current_idx:]
+                chapters.append({
                     'id': f'chapter_{chapter_counter:03d}',
                     'title': f'الجزء {chapter_counter}',
-                    'content': paragraph,
-                    'word_count': paragraph_words,
+                    'content': chunk_text.strip(),
+                    'word_count': len(chunk_text.split()),
                     'start_page': chapter_counter,
                     'end_page': chapter_counter
-                }
-            else:
-                if current_chapter['content']:
-                    current_chapter['content'] += '\n\n' + paragraph
-                else:
-                    current_chapter['content'] = paragraph
-                current_chapter['word_count'] += paragraph_words
-        
-        # إضافة الفصل الأخير
-        if current_chapter['content'].strip():
-            chapters.append(current_chapter)
-        
+                })
+                break
+
+            # محاولة العثور على أفضل نقطة قطع
+            search_end_idx = current_idx + target_chars
+            chunk_candidate = text[current_idx:search_end_idx]
+
+            # نبحث عن نقطة قطع آمنة بالترتيب من الأفضل للأقل
+            # 1. نهاية فقرة (سطرين فارغين)
+            # 2. نهاية جملة (نقطة، علامة استفهام، تعجب متبوعة بمسافة أو سطر جديد)
+
+            safe_split_idx = -1
+
+            # البحث عن نهايات الفقرات (\n\n)
+            last_para_break = chunk_candidate.rfind('\n\n')
+
+            # البحث عن نهايات الجمل
+            # نستخدم التعبيرات النمطية للبحث عن نهايات الجمل (. أو ? أو !) متبوعة بمسافة أو سطر
+            sentence_breaks = [m.end() for m in re.finditer(r'[.?!](?:\s|\n)', chunk_candidate)]
+            last_sentence_break = sentence_breaks[-1] if sentence_breaks else -1
+
+            # التحقق مما إذا كانت نقطة القطع المقترحة داخل اقتباس (حوار)
+            def is_inside_quotes(text_segment, index):
+                """تتحقق مما إذا كان المؤشر يقع داخل علامات تنصيص مفتوحة"""
+                # نعد كل نوع من علامات التنصيص بشكل مستقل لتجنب تداخل الأنواع
+                quote_pairs = [
+                    ('"', '"'),
+                    ("'", "'"),
+                    ('«', '»'),
+                    ('“', '”')
+                ]
+
+                segment_before = text_segment[:index]
+
+                for open_q, close_q in quote_pairs:
+                    if open_q == close_q:
+                        # إذا كانت علامة الفتح والإغلاق متطابقة
+                        if segment_before.count(open_q) % 2 != 0:
+                            return True
+                    else:
+                        # إذا كانت علامة الفتح مختلفة عن علامة الإغلاق
+                        open_count = segment_before.count(open_q)
+                        close_count = segment_before.count(close_q)
+                        if open_count > close_count:
+                            return True
+
+                return False
+
+            # محاولة العثور على نقطة قطع آمنة فعلاً (ليست داخل اقتباس)
+            if last_para_break != -1 and not is_inside_quotes(chunk_candidate, last_para_break):
+                safe_split_idx = last_para_break
+            elif last_sentence_break != -1:
+                # محاولة العثور على نهاية جملة آمنة (خارج الاقتباسات)
+                for brk in reversed(sentence_breaks):
+                    if not is_inside_quotes(chunk_candidate, brk):
+                        safe_split_idx = brk
+                        break
+
+            # إذا لم نجد نقطة قطع آمنة بتاتاً (نادر جداً لفقرة طولها 5000 كلمة)،
+            # نقطع عند آخر مسافة كحل أخير لتجنب تجميد البرنامج
+            if safe_split_idx == -1:
+                last_space = chunk_candidate.rfind(' ')
+                safe_split_idx = last_space if last_space != -1 else len(chunk_candidate)
+
+            # اقتطاع النص النهائي
+            chunk_text = chunk_candidate[:safe_split_idx]
+
+            chapters.append({
+                'id': f'chapter_{chapter_counter:03d}',
+                'title': f'الجزء {chapter_counter}',
+                'content': chunk_text.strip(),
+                'word_count': len(chunk_text.split()),
+                'start_page': chapter_counter,
+                'end_page': chapter_counter
+            })
+
+            chapter_counter += 1
+            # تحديث المؤشر لبداية الجزء التالي (مع تخطي الفراغات)
+            current_idx += safe_split_idx
+
+            # إزالة أي مسافات بيضاء أو أسطر جديدة في بداية الجزء التالي
+            while current_idx < total_length and text[current_idx] in [' ', '\n', '\t', '\r']:
+                current_idx += 1
+
         return chapters
 
     @staticmethod
     def extract_pdf_with_precision(file_path: str) -> Dict[str, Any]:
-        """استخراج دقيق للنص مع الحفاظ على البنية"""
+        """استخراج دقيق للنص باستخدام PyMuPDF (fitz) والتقسيم الذكي المعتمد على السياق فقط"""
         
-        logger.info(f"بدء معالجة ملف PDF: {file_path}")
+        logger.info(f"بدء معالجة ملف PDF باستخدام PyMuPDF: {file_path}")
         
         try:
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                
-                document_info = {
-                    'title': '',
-                    'author': '',
-                    'chapters': [],
-                    'total_pages': len(pdf_reader.pages),
-                    'metadata': {}
-                }
-                
-                # استخراج البيانات الوصفية
-                if pdf_reader.metadata:
-                    document_info['metadata'] = dict(pdf_reader.metadata)
-                    document_info['title'] = pdf_reader.metadata.get('/Title', '')
-                    document_info['author'] = pdf_reader.metadata.get('/Author', '')
-                
-                full_text = ""
-                current_chapter = None
-                chapter_counter = 1
-                
-                for page_num, page in enumerate(pdf_reader.pages):
-                    try:
-                        page_text = page.extract_text()
-                        if not page_text or len(page_text.strip()) < 10:
-                            continue
-                        
-                        # تنظيف النص
-                        page_text = ProfessionalDocumentProcessor.clean_extracted_text(page_text)
-                        
-                        # البحث عن عناوين الفصول
-                        chapter_titles = ProfessionalDocumentProcessor.detect_chapter_titles(page_text)
-                        
-                        if chapter_titles:
-                            # حفظ الفصل السابق
-                            if current_chapter:
-                                document_info['chapters'].append(current_chapter)
-                            
-                            # بدء فصل جديد
-                            for title in chapter_titles:
-                                current_chapter = {
-                                    'id': f'chapter_{chapter_counter:03d}',
-                                    'title': title,
-                                    'content': page_text,
-                                    'start_page': page_num + 1,
-                                    'end_page': page_num + 1,
-                                    'word_count': len(page_text.split())
-                                }
-                                chapter_counter += 1
-                                break
-                        else:
-                            # إضافة للفصل الحالي
-                            if current_chapter:
-                                current_chapter['content'] += "\n\n" + page_text
-                                current_chapter['end_page'] = page_num + 1
-                                current_chapter['word_count'] = len(current_chapter['content'].split())
-                            else:
-                                # إنشاء فصل افتراضي
-                                current_chapter = {
-                                    'id': f'chapter_{chapter_counter:03d}',
-                                    'title': f'الجزء {chapter_counter}',
-                                    'content': page_text,
-                                    'start_page': page_num + 1,
-                                    'end_page': page_num + 1,
-                                    'word_count': len(page_text.split())
-                                }
-                                chapter_counter += 1
-                        
-                        full_text += page_text + "\n\n"
-                        
-                    except Exception as e:
-                        logger.warning(f"خطأ في معالجة الصفحة {page_num + 1}: {str(e)}")
+            doc = fitz.open(file_path)
+
+            document_info = {
+                'title': doc.metadata.get('title', ''),
+                'author': doc.metadata.get('author', ''),
+                'chapters': [],
+                'total_pages': len(doc),
+                'metadata': doc.metadata
+            }
+
+            full_text = ""
+
+            for page_num in range(len(doc)):
+                try:
+                    page = doc.load_page(page_num)
+                    page_text = page.get_text()
+
+                    if not page_text or len(page_text.strip()) < 10:
                         continue
-                
-                # إضافة الفصل الأخير
-                if current_chapter:
-                    document_info['chapters'].append(current_chapter)
-                
-                # إذا لم توجد فصول، تقسيم ذكي
-                if not document_info['chapters']:
-                    document_info['chapters'] = ProfessionalDocumentProcessor.smart_text_division(full_text)
-                
-                logger.info(f"تم استخراج {len(document_info['chapters'])} فصل من {document_info['total_pages']} صفحة")
-                
-                # إحصائيات
-                total_words = sum(ch['word_count'] for ch in document_info['chapters'])
-                logger.info(f"إجمالي الكلمات: {total_words:,}")
-                
-                return document_info
-                
+
+                    # تنظيف النص المبدئي
+                    page_text = ProfessionalDocumentProcessor.clean_extracted_text(page_text)
+                    full_text += page_text + "\n\n"
+
+                except Exception as e:
+                    logger.warning(f"خطأ في معالجة الصفحة {page_num + 1}: {str(e)}")
+                    continue
+
+            doc.close()
+
+            # تنظيف إضافي للنص الكامل لضمان عدم وجود فجوات غريبة
+            full_text = re.sub(r'\n{3,}', '\n\n', full_text)
+
+            logger.info("تم استخراج كامل النص، جاري تطبيق التقسيم الذكي المعتمد على السياق...")
+
+            # التقسيم الذكي للنص
+            document_info['chapters'] = ProfessionalDocumentProcessor.smart_text_division(full_text)
+
+            logger.info(f"تم تقسيم النص إلى {len(document_info['chapters'])} جزء مع الحفاظ على السياق")
+
+            # إحصائيات
+            total_words = sum(ch['word_count'] for ch in document_info['chapters'])
+            logger.info(f"إجمالي الكلمات: {total_words:,}")
+
+            return document_info
+
         except Exception as e:
-            logger.error(f"خطأ في قراءة ملف PDF: {str(e)}")
+            logger.error(f"خطأ في قراءة ملف PDF باستخدام PyMuPDF: {str(e)}")
             raise
     
     @staticmethod
