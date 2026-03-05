@@ -85,11 +85,14 @@ def setup_comprehensive_logging():
     )
 
     # إعداد Formatter لملفات السجل (JSON) و Formatter للطرفية (Rich)
+    from rich.logging import RichHandler
+
     json_formatter = structlog.stdlib.ProcessorFormatter(
-        processors=[
-            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.processors.JSONRenderer(ensure_ascii=False)
-        ]
+        processor=structlog.processors.JSONRenderer(ensure_ascii=False),
+    )
+
+    console_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=structlog.dev.ConsoleRenderer(colors=True),
     )
 
     # إعداد logger الرئيسي مع rotation
@@ -107,10 +110,10 @@ def setup_comprehensive_logging():
     main_handler.setFormatter(json_formatter)
     main_logger_std.addHandler(main_handler)
 
-    # Console handler لطباعة السجلات في الطرفية
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'))
-    main_logger_std.addHandler(console_handler)
+    # Console handler لطباعة السجلات الملونة والمنسقة في الطرفية باستخدام Rich
+    rich_handler = RichHandler(console=console, show_time=False, show_path=False, markup=True)
+    rich_handler.setFormatter(console_formatter)
+    main_logger_std.addHandler(rich_handler)
 
     # logger منفصل لمراقبة الجودة مع rotation
     quality_logger_std = logging.getLogger('quality_control')
@@ -126,9 +129,9 @@ def setup_comprehensive_logging():
     quality_handler.setFormatter(json_formatter)
     quality_logger_std.addHandler(quality_handler)
 
-    quality_console_handler = logging.StreamHandler()
-    quality_console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - QUALITY - %(message)s'))
-    quality_logger_std.addHandler(quality_console_handler)
+    quality_rich_handler = RichHandler(console=console, show_time=False, show_path=False, markup=True)
+    quality_rich_handler.setFormatter(console_formatter)
+    quality_logger_std.addHandler(quality_rich_handler)
 
     # استخدام structlog للحصول على واجهة استخدام محسنة (تتيح إرسال kwargs)
     main_logger = structlog.get_logger('main')
@@ -888,11 +891,11 @@ class CompleteTranslationEngine:
             request_type="complete_translation"
         )
         
-        initial_translation, _, _ = initial_translation_result if initial_translation_result else (None, 0.0, None)
+        initial_translation, response_time, api_key_used = initial_translation_result if initial_translation_result else (None, 0.0, None)
 
         if not initial_translation:
             logger.error("فشل في الترجمة الأولى")
-            return None
+            return None, 0.0, None
         
         logger.info("تمت الترجمة الأولى، بدء فحص الاكتمال...")
         
@@ -935,7 +938,9 @@ class CompleteTranslationEngine:
                 request_type="completion_review"
             )
             
-            completed_translation, _, _ = completed_translation_result if completed_translation_result else (None, 0.0, None)
+            completed_translation, r_time, a_key = completed_translation_result if completed_translation_result else (None, 0.0, None)
+            if r_time: response_time += r_time
+            if a_key: api_key_used = a_key
 
             if completed_translation:
                 # فحص إضافي للتأكد من الاكتمال
@@ -961,7 +966,9 @@ class CompleteTranslationEngine:
                         request_type="final_completion"
                     )
                     
-                    final_translation, _, _ = final_translation_result if final_translation_result else (None, 0.0, None)
+                    final_translation, r_time, a_key = final_translation_result if final_translation_result else (None, 0.0, None)
+                    if r_time: response_time += r_time
+                    if a_key: api_key_used = a_key
 
                     if final_translation:
                         final_translation = self.content_processor.convert_numbers_to_arabic(final_translation)
