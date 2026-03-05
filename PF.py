@@ -36,52 +36,103 @@ from collections import deque
 import asyncio
 import aiohttp
 import time
+import structlog
+from rich.console import Console
 
-# ============= تحسين 1: نظام السجلات المحسن مع Rotation =============
+# تهيئة Rich Console للطباعة المنسقة في الطرفية
+console = Console()
+
+# ============= تحسين 1: نظام السجلات المحسن الذكي باستخدام Structlog =============
 def setup_comprehensive_logging():
-    """إعداد نظام سجلات شامل مع rotation تلقائي"""
-    log_format = '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
-    
+    """إعداد نظام سجلات شامل وذكي مع structlog و rich، متوافق مع الاستعلام وقاعدة البيانات"""
     log_dir = Path("translation_logs")
     log_dir.mkdir(exist_ok=True)
     
-    # أسماء ملفات السجلات
+    # تنظيف السجلات القديمة: الاحتفاظ بآخر 5 ملفات فقط لكل نوع (تجنب التراكم الذي ذكره المستخدم)
+    def clean_old_logs(prefix: str, keep: int = 5):
+        logs = sorted(log_dir.glob(f"{prefix}_*.log"), key=os.path.getmtime, reverse=True)
+        for old_log in logs[keep:]:
+            try:
+                old_log.unlink()
+            except Exception:
+                pass
+
+    clean_old_logs("main_translation")
+    clean_old_logs("quality_control")
+
+    # أسماء ملفات السجلات الجديدة بصيغة JSON
     main_log = log_dir / f'main_translation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
     quality_log = log_dir / f'quality_control_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
     
+    # إعداد إعدادات logging القياسية للتوجيه لملفات باستخدام JSON
+    shared_processors = [
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+    ]
+
+    structlog.configure(
+        processors=shared_processors + [
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    # إعداد Formatter لملفات السجل (JSON) و Formatter للطرفية (Rich)
+    json_formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.JSONRenderer(ensure_ascii=False)
+        ]
+    )
+
     # إعداد logger الرئيسي مع rotation
-    main_logger = logging.getLogger('main')
-    main_logger.setLevel(logging.INFO)
+    main_logger_std = logging.getLogger('main')
+    main_logger_std.setLevel(logging.INFO)
+    main_logger_std.handlers.clear() # تفريغ لتجنب التكرار
     
-    if not main_logger.handlers:
-        # Rotating file handler - 10MB لكل ملف، الاحتفاظ بـ 5 ملفات
-        main_handler = RotatingFileHandler(
-            main_log, 
-            maxBytes=10*1024*1024,  # 10MB
-            backupCount=5,
-            encoding='utf-8'
-        )
-        main_handler.setFormatter(logging.Formatter(log_format))
-        main_logger.addHandler(main_handler)
-        
-        # console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(log_format))
-        main_logger.addHandler(console_handler)
-    
+    # Rotating file handler للملف الرئيسي بصيغة JSON
+    main_handler = RotatingFileHandler(
+        main_log,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    main_handler.setFormatter(json_formatter)
+    main_logger_std.addHandler(main_handler)
+
+    # Console handler لطباعة السجلات في الطرفية
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'))
+    main_logger_std.addHandler(console_handler)
+
     # logger منفصل لمراقبة الجودة مع rotation
-    quality_logger = logging.getLogger('quality_control')
-    quality_logger.setLevel(logging.INFO)
+    quality_logger_std = logging.getLogger('quality_control')
+    quality_logger_std.setLevel(logging.INFO)
+    quality_logger_std.handlers.clear()
     
-    if not quality_logger.handlers:
-        quality_handler = RotatingFileHandler(
-            quality_log,
-            maxBytes=5*1024*1024,  # 5MB
-            backupCount=3,
-            encoding='utf-8'
-        )
-        quality_handler.setFormatter(logging.Formatter(log_format))
-        quality_logger.addHandler(quality_handler)
+    quality_handler = RotatingFileHandler(
+        quality_log,
+        maxBytes=5*1024*1024,  # 5MB
+        backupCount=3,
+        encoding='utf-8'
+    )
+    quality_handler.setFormatter(json_formatter)
+    quality_logger_std.addHandler(quality_handler)
+
+    quality_console_handler = logging.StreamHandler()
+    quality_console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - QUALITY - %(message)s'))
+    quality_logger_std.addHandler(quality_console_handler)
+
+    # استخدام structlog للحصول على واجهة استخدام محسنة (تتيح إرسال kwargs)
+    main_logger = structlog.get_logger('main')
+    quality_logger = structlog.get_logger('quality_control')
     
     return main_logger, quality_logger
 
@@ -157,7 +208,7 @@ class TokenRateLimiter:
 
         return max(wait_times) if wait_times else 0.0
 
-# ============= تحسين 3: إحصائيات محسنة للمفاتيح =============
+# ============= تحسين 3: إحصائيات محسنة للمفاتيح ونظام التنبيه الذكي =============
 class KeyStatistics:
     """إحصائيات متقدمة لكل مفتاح API"""
     
@@ -167,29 +218,34 @@ class KeyStatistics:
         self.failed_requests = 0
         self.rate_limit_hits = 0
         self.server_errors = 0
+        self.consecutive_failures = 0  # تتبع الأخطاء المتتالية للتنبيه
         self.last_error_time = None
         self.last_success_time = None
         self.average_response_time = 0
         self.response_times = deque(maxlen=100)  # آخر 100 وقت استجابة
         
     def record_success(self, response_time: float):
-        """تسجيل طلب ناجح"""
+        """تسجيل طلب ناجح وإعادة تعيين عداد الإخفاقات المتتالية"""
         self.successful_requests += 1
         self.total_requests += 1
+        self.consecutive_failures = 0
         self.last_success_time = datetime.now()
         self.response_times.append(response_time)
         self._update_average_response_time()
     
-    def record_failure(self, error_type: str = "general"):
-        """تسجيل طلب فاشل"""
+    def record_failure(self, error_type: str = "general") -> bool:
+        """تسجيل طلب فاشل. يرجع True إذا وصل عدد الإخفاقات المتتالية إلى 3 للتنبيه."""
         self.failed_requests += 1
         self.total_requests += 1
+        self.consecutive_failures += 1
         self.last_error_time = datetime.now()
         
         if error_type == "rate_limit":
             self.rate_limit_hits += 1
         elif error_type == "server_error":
             self.server_errors += 1
+
+        return self.consecutive_failures >= 3
     
     def _update_average_response_time(self):
         """تحديث متوسط وقت الاستجابة"""
@@ -454,14 +510,20 @@ class EnhancedGeminiAPI:
                             self.key_stats[api_key].record_success(response_time)
                             logger.info(f"نجح طلب {request_type} مع المفتاح {api_key[:10]}...")
                             
-                            return content.strip()
+                            return content.strip(), response_time, api_key
                         else:
                             logger.warning(f"استجابة غير متوقعة من Gemini: {result}")
-                            self.key_stats[api_key].record_failure("invalid_response")
+                            should_alert = self.key_stats[api_key].record_failure("invalid_response")
+                            if should_alert:
+                                logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية", key_status="consecutive_failures")
+                                console.print(f"[bold yellow]⚠️ تنبيه: المفتاح {api_key[:10]} فشل 3 مرات متتالية ولكنه لا يزال قيد الاستخدام.[/bold yellow]")
                             
                     elif response.status == 429:
                         logger.warning(f"تجاوز حد المعدل للمفتاح {api_key[:10]}... انتظار")
-                        self.key_stats[api_key].record_failure("rate_limit")
+                        should_alert = self.key_stats[api_key].record_failure("rate_limit")
+                        if should_alert:
+                            logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Rate Limit)", key_status="consecutive_failures")
+                            console.print(f"[bold yellow]⚠️ تنبيه: المفتاح {api_key[:10]} فشل 3 مرات متتالية بسبب حدود المعدل.[/bold yellow]")
                         
                         # حظر المفتاح مؤقتاً
                         block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
@@ -471,13 +533,19 @@ class EnhancedGeminiAPI:
                         
                     elif response.status >= 500:
                         logger.error(f"خطأ خادم Gemini: {response.status}")
-                        self.key_stats[api_key].record_failure("server_error")
+                        should_alert = self.key_stats[api_key].record_failure("server_error")
+                        if should_alert:
+                            logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Server Error)", key_status="consecutive_failures")
+                            console.print(f"[bold red]⚠️ تنبيه: المفتاح {api_key[:10]} يواجه أخطاء خادم متتالية![/bold red]")
                         await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
                         
                     else:
                         error_text = await response.text()
                         logger.error(f"خطأ API غير متوقع: {response.status} - {error_text}")
-                        self.key_stats[api_key].record_failure("api_error")
+                        should_alert = self.key_stats[api_key].record_failure("api_error")
+                        if should_alert:
+                            logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (API Error)", key_status="consecutive_failures")
+                            console.print(f"[bold red]⚠️ تنبيه: المفتاح {api_key[:10]} يواجه أخطاء غير متوقعة מתتالية![/bold red]")
                         
                         # حظر المفتاح إذا كان الخطأ متعلق بالمفتاح نفسه
                         if response.status in [401, 403]:
@@ -485,16 +553,21 @@ class EnhancedGeminiAPI:
                             
             except asyncio.TimeoutError:
                 logger.warning(f"انتهت مهلة طلب {request_type} (محاولة {attempt + 1})")
-                self.key_stats[api_key].record_failure("timeout")
+                should_alert = self.key_stats[api_key].record_failure("timeout")
+                if should_alert:
+                    logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Timeout)", key_status="consecutive_failures")
+                    console.print(f"[bold yellow]⚠️ تنبيه: المفتاح {api_key[:10]} يواجه مهلة زمنية منتهية باستمرار.[/bold yellow]")
                 await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
                 
             except Exception as e:
                 logger.error(f"خطأ في طلب {request_type} (محاولة {attempt + 1}): {str(e)}")
-                self.key_stats[api_key].record_failure("exception")
+                should_alert = self.key_stats[api_key].record_failure("exception")
+                if should_alert:
+                    logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Exception)", key_status="consecutive_failures")
                 await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
         
         logger.error(f"فشل طلب {request_type} بعد {self.max_retries} محاولات")
-        return None
+        return None, 0.0, None
     
     def get_statistics_summary(self) -> Dict[str, Any]:
         """الحصول على ملخص إحصائيات جميع المفاتيح"""
@@ -809,12 +882,14 @@ class CompleteTranslationEngine:
         # المرحلة 2: الترجمة الأولية الشاملة
         translation_prompt = self.create_complete_translation_prompt(text, context, text_analysis)
         
-        initial_translation = await self.api_manager.make_precision_request(
+        initial_translation_result = await self.api_manager.make_precision_request(
             translation_prompt, 
             temperature=0.1,  # توازن بين الإبداع والدقة
             request_type="complete_translation"
         )
         
+        initial_translation, _, _ = initial_translation_result if initial_translation_result else (None, 0.0, None)
+
         if not initial_translation:
             logger.error("فشل في الترجمة الأولى")
             return None
@@ -854,12 +929,14 @@ class CompleteTranslationEngine:
 
 قدم الترجمة المكتملة والشاملة (النص المترجم فقط):"""
             
-            completed_translation = await self.api_manager.make_precision_request(
+            completed_translation_result = await self.api_manager.make_precision_request(
                 completion_prompt,
                 temperature=0.05,
                 request_type="completion_review"
             )
             
+            completed_translation, _, _ = completed_translation_result if completed_translation_result else (None, 0.0, None)
+
             if completed_translation:
                 # فحص إضافي للتأكد من الاكتمال
                 final_check = self.content_processor.detect_incomplete_translation(text, completed_translation)
@@ -878,12 +955,14 @@ class CompleteTranslationEngine:
 
 الترجمة النهائية الكاملة:"""
                     
-                    final_translation = await self.api_manager.make_precision_request(
+                    final_translation_result = await self.api_manager.make_precision_request(
                         final_completion_prompt,
                         temperature=0.02,
                         request_type="final_completion"
                     )
                     
+                    final_translation, _, _ = final_translation_result if final_translation_result else (None, 0.0, None)
+
                     if final_translation:
                         final_translation = self.content_processor.convert_numbers_to_arabic(final_translation)
                     else:
@@ -905,7 +984,7 @@ class CompleteTranslationEngine:
             # استخراج المصطلحات
             await self.extract_terminology(text, final_translation)
         
-        return final_translation
+        return final_translation, response_time, api_key_used
     
     async def translate_with_comprehensive_review(self, text: str, context: str = "") -> Optional[str]:
         """ترجمة شاملة مع مراجعة متعددة المراحل لضمان عدم ترك أي محتوى أجنبي"""
@@ -919,15 +998,17 @@ class CompleteTranslationEngine:
         # المرحلة 2: الترجمة الأولية السياقية
         translation_prompt = self.create_complete_translation_prompt(text, context, text_analysis)
         
-        initial_translation = await self.api_manager.make_precision_request(
+        initial_translation_result = await self.api_manager.make_precision_request(
             translation_prompt, 
             temperature=0.1,  # توازن بين الإبداع والدقة
             request_type="contextual_translation"
         )
         
+        initial_translation, response_time, api_key_used = initial_translation_result if initial_translation_result else (None, 0.0, None)
+
         if not initial_translation:
             logger.error("فشل في الترجمة الأولى")
-            return None
+            return None, 0.0, None
         
         logger.info("تمت الترجمة الأولى، بدء المراجعة الشاملة...")
         
@@ -957,12 +1038,14 @@ class CompleteTranslationEngine:
 
 قدم الترجمة المُصححة والخالية تماماً من أي محتوى أجنبي (النص فقط):"""
             
-            corrected_translation = await self.api_manager.make_precision_request(
+            corrected_translation_result = await self.api_manager.make_precision_request(
                 comprehensive_review_prompt,
                 temperature=0.05,
                 request_type="comprehensive_correction"
             )
             
+            corrected_translation, _, _ = corrected_translation_result if corrected_translation_result else (None, 0.0, None)
+
             if corrected_translation:
                 # فحص إضافي
                 if not self.content_processor.has_any_foreign_content(corrected_translation):
@@ -979,12 +1062,14 @@ class CompleteTranslationEngine:
 
 النص النهائي الخالي تماماً من الإنجليزية (عربي فقط):"""
                     
-                    final_translation = await self.api_manager.make_precision_request(
+                    final_translation_result = await self.api_manager.make_precision_request(
                         final_correction_prompt,
                         temperature=0.02,
                         request_type="final_cleanup"
                     )
                     
+                    final_translation, _, _ = final_translation_result if final_translation_result else (None, 0.0, None)
+
                     if final_translation:
                         final_translation = self.content_processor.convert_numbers_to_arabic(final_translation)
                     else:
@@ -1006,7 +1091,7 @@ class CompleteTranslationEngine:
             # استخراج المصطلحات المحسن
             await self.extract_terminology(text, final_translation)
         
-        return final_translation
+        return final_translation, response_time, api_key_used
     
     async def extract_terminology(self, original: str, translation: str):
         """استخراج وحفظ المصطلحات المهمة"""
@@ -1024,12 +1109,14 @@ class CompleteTranslationEngine:
 
 المصطلحات المهمة:"""
         
-        terms_response = await self.api_manager.make_precision_request(
+        terms_response_result = await self.api_manager.make_precision_request(
             extraction_prompt,
             temperature=0.1,
             request_type="terminology_extraction"
         )
         
+        terms_response, _, _ = terms_response_result if terms_response_result else (None, 0.0, None)
+
         if terms_response:
             lines = terms_response.strip().split('\n')
             for line in lines:
@@ -1306,12 +1393,14 @@ class EnhancedDocumentGenerator:
 
 عنوان مترجم مميز (٣-٨ كلمات فقط):"""
                     
-                    translated_title = await api_manager.make_precision_request(
+                    translated_title_result = await api_manager.make_precision_request(
                         translation_prompt,
                         temperature=0.2,
                         request_type="chapter_title_translation"
                     )
                     
+                    translated_title, _, _ = translated_title_result if translated_title_result else (None, 0.0, None)
+
                     if translated_title:
                         clean_title = translated_title.strip()[:50]
                         # تجنب تكرار نفس الترجمة
@@ -1646,9 +1735,25 @@ class MasterTranslationSystem:
                 )
             ''')
 
+            # جدول الأحداث الاستخباراتية (الجديد)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS intelligent_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT,
+                    api_key TEXT,
+                    duration REAL,
+                    genre TEXT,
+                    tone TEXT,
+                    word_count INTEGER,
+                    status TEXT,
+                    error_type TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             conn.commit()
 
-        logger.info("تم إنشاء قاعدة البيانات المتقدمة")
+        logger.info("تم إنشاء قاعدة البيانات المتقدمة وتوسيعها بالجداول الاستخباراتية")
     
     def save_chapter_advanced(self, chapter_data: Dict[str, Any]):
         """حفظ متقدم للفصل مع جميع البيانات"""
@@ -1693,9 +1798,85 @@ class MasterTranslationSystem:
                 INSERT INTO translation_logs
                 (chapter_id, operation, status, message, duration, api_key_used)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (chapter_id, operation, status, message, duration, api_key[:10]))
+            ''', (chapter_id, operation, status, message, duration, api_key[:15] if api_key else ""))
 
             conn.commit()
+
+    def log_intelligent_event(self, event_type: str, api_key: str = None,
+                              duration: float = None, genre: str = None, tone: str = None,
+                              word_count: int = None, status: str = None, error_type: str = None):
+        """تسجيل حدث استخباراتي مهيكل في قاعدة البيانات لتحليلات الأداء والمشاكل"""
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO intelligent_events
+                (event_type, api_key, duration, genre, tone, word_count, status, error_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (event_type, api_key[:15] if api_key else None, duration, genre, tone, word_count, status, error_type))
+            conn.commit()
+
+    def analyze_and_display_intelligence(self):
+        """تحليل البيانات الاستخباراتية من قاعدة البيانات وعرضها باستخدام Rich"""
+        from rich.table import Table
+        from rich.panel import Panel
+
+        console.print("\n[bold cyan]🔍 جاري استخراج التحليلات الاستخباراتية من السجلات...[/bold cyan]")
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
+
+            try:
+                # 1. تحليل متوسط وقت الترجمة لكل نوع أدبي
+                cursor.execute('''
+                    SELECT genre, AVG(duration) as avg_duration, COUNT(*) as count
+                    FROM intelligent_events
+                    WHERE event_type = 'translation_complete' AND duration IS NOT NULL
+                    GROUP BY genre
+                ''')
+                genre_stats = cursor.fetchall()
+
+                if genre_stats:
+                    table_genre = Table(title="[bold]متوسط وقت الترجمة حسب النوع الأدبي[/bold]", show_header=True, header_style="bold magenta")
+                    table_genre.add_column("النوع الأدبي", justify="right")
+                    table_genre.add_column("متوسط الوقت (ثانية)", justify="center")
+                    table_genre.add_column("عدد الفصول", justify="center")
+
+                    for genre, avg_duration, count in genre_stats:
+                        table_genre.add_row(str(genre), f"{avg_duration:.2f}", str(count))
+
+                    console.print(table_genre)
+                else:
+                    console.print("[dim]لا توجد بيانات كافية لتحليل الأنواع الأدبية.[/dim]")
+
+                # 2. تحليل الساعات الأكثر استجابة (متوسط وقت الاستجابة لكل ساعة)
+                cursor.execute('''
+                    SELECT strftime('%H', timestamp) as hour, AVG(duration) as avg_duration, COUNT(*) as count
+                    FROM intelligent_events
+                    WHERE event_type = 'translation_complete' AND duration IS NOT NULL
+                    GROUP BY hour
+                    ORDER BY avg_duration ASC
+                ''')
+                hour_stats = cursor.fetchall()
+
+                if hour_stats:
+                    table_hour = Table(title="[bold]أنماط الأداء: أسرع ساعات الاستجابة[/bold]", show_header=True, header_style="bold green")
+                    table_hour.add_column("الساعة (بتوقيت الخادم)", justify="center")
+                    table_hour.add_column("متوسط سرعة الاستجابة (ثانية)", justify="center")
+                    table_hour.add_column("عدد العمليات", justify="center")
+
+                    for hour, avg_duration, count in hour_stats:
+                        table_hour.add_row(f"{hour}:00", f"{avg_duration:.2f}", str(count))
+
+                    console.print(table_hour)
+
+                    # استنتاج ذكي
+                    best_hour = hour_stats[0][0]
+                    console.print(Panel(f"[bold green]💡 استنتاج ذكي:[/bold green] أفضل وقت لاستخدام النظام هو حوالي الساعة [bold]{best_hour}:00[/bold] حيث تكون استجابة الـ API في أسرع حالاتها.", title="نصيحة أداء"))
+                else:
+                    console.print("[dim]لا توجد بيانات كافية لتحليل أفضل ساعات الاستجابة.[/dim]")
+
+            except Exception as e:
+                console.print(f"[bold red]حدث خطأ أثناء استخراج التحليلات الاستخباراتية: {str(e)}[/bold red]")
 
     def _load_completed_chapters_from_db(self) -> Dict[str, Any]:
         """تحميل الفصول المكتملة مسبقاً من قاعدة البيانات"""
@@ -1749,7 +1930,7 @@ class MasterTranslationSystem:
             # الترجمة الشاملة مع المراجعة
             translation_context = f"هذا الفصل بعنوان '{chapter['title']}' من رواية أدبية"
             
-            translated_content = await self.translation_engine.translate_with_comprehensive_review(
+            translated_content, response_time, api_key_used = await self.translation_engine.translate_with_comprehensive_review(
                 content, translation_context
             )
             
@@ -1775,11 +1956,23 @@ class MasterTranslationSystem:
                 # حفظ النتائج
                 self.save_chapter_advanced(chapter)
                 
-                # تسجيل النجاح
+                # تسجيل الحدث الاستخباراتي
+                self.log_intelligent_event(
+                    event_type="translation_complete",
+                    api_key=api_key_used,
+                    duration=response_time,
+                    genre=text_analysis['genre'],
+                    tone=text_analysis['tone'],
+                    word_count=chapter['word_count'],
+                    status="success"
+                )
+
+                # تسجيل النجاح في السجلات العادية
                 self.log_operation(
                     chapter_id, "translation_complete", "success",
                     f"تمت الترجمة في {translation_time:.2f}ث، النوع: {text_analysis['genre']}, التصحيحات: {corrections_count}",
-                    translation_time
+                    translation_time,
+                    api_key_used if api_key_used else ""
                 )
                 
                 # تحديث الإحصائيات
@@ -1843,6 +2036,9 @@ class MasterTranslationSystem:
         self.translation_stats['translation_start_time'] = time.time()
         
         try:
+            # المرحلة 0: عرض التحليلات الاستخباراتية السابقة (إن وجدت)
+            self.analyze_and_display_intelligence()
+
             # المرحلة 1: استخراج وتحليل المستند
             logger.info("📖 المرحلة 1: استخراج وتحليل المستند...")
             document_structure = self.document_processor.extract_pdf_with_precision(pdf_path)
@@ -1871,43 +2067,54 @@ class MasterTranslationSystem:
             
             all_processed_chapters = []
             
-            for i, chapter in enumerate(chapters):
-                logger.info("-" * 50)
-                
-                # التحقق من وجود ترجمة سابقة للفصل
-                if chapter['id'] in previously_completed:
-                    logger.info(f"⏭️ تخطي الفصل {i+1}/{len(chapters)}: '{chapter['title']}' (مترجم مسبقاً).")
-                    
-                    completed_chapter_info = previously_completed[chapter['id']]
-                    all_processed_chapters.append(completed_chapter_info)
-                    
-                    # تحديث الإحصائيات
-                    self.translation_stats['skipped_chapters'] += 1
-                    self.translation_stats['completed_chapters'] += 1
-                    self.translation_stats['translated_words'] += completed_chapter_info.get('word_count', 0)
-                    continue
+            from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
 
-                logger.info(f"📝 ترجمة الفصل {i+1}/{len(chapters)}: {chapter['title']}")
-                result = await self.translate_chapter_comprehensively(chapter)
-                all_processed_chapters.append(result)
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(complete_style="green", finished_style="bold green"),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
+                console=console
+            ) as progress:
+                translation_task = progress.add_task("[cyan]ترجمة الفصول...", total=len(chapters))
                 
-                progress = (i + 1) / len(chapters) * 100
-                elapsed_time = time.time() - self.translation_stats['translation_start_time']
-                
-                chapters_done = i + 1
-                if chapters_done > 0:
-                    avg_time_per_chapter = elapsed_time / chapters_done
-                    remaining_chapters = len(chapters) - chapters_done
-                    estimated_remaining = avg_time_per_chapter * remaining_chapters
+                for i, chapter in enumerate(chapters):
+                    logger.info("-" * 50)
                     
-                    logger.info(f"📈 التقدم: {progress:.1f}% ({chapters_done}/{len(chapters)})")
-                    logger.info(f"⏰ الوقت المقدر المتبقي: {estimated_remaining/60:.1f} دقيقة")
+                    # التحقق من وجود ترجمة سابقة للفصل
+                    if chapter['id'] in previously_completed:
+                        logger.info(f"⏭️ تخطي الفصل {i+1}/{len(chapters)}: '{chapter['title']}' (مترجم مسبقاً).")
+
+                        completed_chapter_info = previously_completed[chapter['id']]
+                        all_processed_chapters.append(completed_chapter_info)
+
+                        # تحديث الإحصائيات
+                        self.translation_stats['skipped_chapters'] += 1
+                        self.translation_stats['completed_chapters'] += 1
+                        self.translation_stats['translated_words'] += completed_chapter_info.get('word_count', 0)
+
+                        progress.update(translation_task, advance=1, description=f"[green]تم التخطي (مترجم مسبقاً): {chapter['title']}")
+                        continue
+
+                    logger.info(f"📝 ترجمة الفصل {i+1}/{len(chapters)}: {chapter['title']}")
+                    progress.update(translation_task, description=f"[yellow]جاري ترجمة: {chapter['title']}")
                     
-                    successful = sum(1 for ch in all_processed_chapters if ch['status'] == 'completed')
-                    if successful > 0:
-                        logger.info(f"✅ الفصول المكتملة: {successful}")
-                        logger.info(f"🔧 تصحيحات المحتوى الأجنبي: {self.translation_stats['foreign_content_corrections']}")
-                        logger.info(f"📖 تكيفات سياقية: {self.translation_stats['contextual_adaptations']}")
+                    result = await self.translate_chapter_comprehensively(chapter)
+                    all_processed_chapters.append(result)
+                    
+                    progress.update(translation_task, advance=1, description=f"[green]تم الانتهاء من: {chapter['title']}")
+
+                    elapsed_time = time.time() - self.translation_stats['translation_start_time']
+                    chapters_done = i + 1
+                    if chapters_done > 0:
+                        avg_time_per_chapter = elapsed_time / chapters_done
+                        remaining_chapters = len(chapters) - chapters_done
+                        estimated_remaining = avg_time_per_chapter * remaining_chapters
+
+                        # Only logging summary stats instead of visual progress bar numbers
+                        successful = sum(1 for ch in all_processed_chapters if ch['status'] == 'completed')
+                        if successful > 0 and chapters_done % 5 == 0:
+                            logger.info(f"✅ إحصائية: الفصول المكتملة {successful}")
             
             # المرحلة 3: التحقق النهائي من الجودة
             logger.info("🔍 المرحلة 3: التحقق النهائي من الجودة...")
