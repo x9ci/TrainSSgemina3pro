@@ -38,6 +38,8 @@ import aiohttp
 import time
 import structlog
 from rich.console import Console
+from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
+from rich.logging import RichHandler
 
 # تهيئة Rich Console للطباعة المنسقة في الطرفية
 console = Console()
@@ -85,8 +87,6 @@ def setup_comprehensive_logging():
     )
 
     # إعداد Formatter لملفات السجل (JSON) و Formatter للطرفية (Rich)
-    from rich.logging import RichHandler
-
     json_formatter = structlog.stdlib.ProcessorFormatter(
         processor=structlog.processors.JSONRenderer(ensure_ascii=False),
     )
@@ -327,7 +327,7 @@ class EnhancedGeminiAPI:
         self.connector = None
         self.session = None
         
-        logger.info(f"تم تهيئة Gemini API مع {len(self.api_keys)} مفتاح")
+        logger.info(f"Gemini API initialized with {len(self.api_keys)} keys")
     
     async def _ensure_session(self):
         """التأكد من وجود جلسة HTTP نشطة مع connection pooling"""
@@ -354,7 +354,7 @@ class EnhancedGeminiAPI:
         
         for key in keys_to_unblock:
             del self.blocked_keys[key]
-            logger.info(f"تم إلغاء حظر المفتاح: {key[:10]}...")
+            logger.info(f"Unblocked key: {key[:10]}...")
     
     def estimate_tokens(self, text: str) -> int:
         """تقدير عدد التوكنز في النص (تقريباً 4 أحرف = 1 توكن)"""
@@ -407,18 +407,18 @@ class EnhancedGeminiAPI:
                         min_wait = wait_time
 
             if all_daily_exhausted:
-                logger.error("تم استنفاد الحد اليومي لجميع المفاتيح! يجب الانتظار لليوم التالي أو إضافة مفاتيح جديدة.")
+                logger.error("All keys have exhausted their daily limit! Must wait until the next day or add new keys.")
                 # الانتظار لمدة طويلة ثم المحاولة مجدداً عبر الحلقة (تجنب الاستدعاء المتكرر recursive)
                 await asyncio.sleep(60)
                 continue
 
             if min_wait < float('inf') and min_wait > 0:
-                logger.info(f"جميع المفاتيح مشغولة حالياً، انتظار ذكي لمدة {min_wait:.1f} ثانية...")
+                logger.info(f"All keys are currently busy, smartly waiting for {min_wait:.1f} seconds...")
                 await asyncio.sleep(min_wait + 0.5)
                 continue
             
             # إذا فشلت كل المحاولات، أعد تعيين المفاتيح المحظورة وانتظر
-            logger.warning("جميع المفاتيح محظورة، انتظار...")
+            logger.warning("All keys are blocked, waiting...")
             await asyncio.sleep(15)
             self.blocked_keys.clear()
             # Loop will continue
@@ -439,7 +439,7 @@ class EnhancedGeminiAPI:
         for attempt in range(self.max_retries):
             api_key = await self.get_optimal_api_key(total_estimated_tokens)
             if not api_key:
-                logger.error("لا توجد مفاتيح API متاحة")
+                logger.error("No API keys available")
                 return None
             
             # تسجيل الطلب والتوكنز المقدرة
@@ -493,7 +493,7 @@ class EnhancedGeminiAPI:
             url = f"{self.base_url}?key={api_key}"
             
             try:
-                logger.info(f"إرسال طلب {request_type} للمحاولة {attempt + 1} باستخدام مفتاح {api_key[:10]}...")
+                logger.info(f"Sending {request_type} request for attempt {attempt + 1} using key {api_key[:10]}...")
                 
                 # استخدام الجلسة المحفوظة بدلاً من إنشاء جلسة جديدة
                 async with self.session.post(url, json=payload, headers=headers) as response:
@@ -511,22 +511,22 @@ class EnhancedGeminiAPI:
                             
                             # تسجيل النجاح
                             self.key_stats[api_key].record_success(response_time)
-                            logger.info(f"نجح طلب {request_type} مع المفتاح {api_key[:10]}...")
+                            logger.info(f"Request {request_type} succeeded with key {api_key[:10]}...")
                             
                             return content.strip(), response_time, api_key
                         else:
-                            logger.warning(f"استجابة غير متوقعة من Gemini: {result}")
+                            logger.warning(f"Unexpected response from Gemini: {result}")
                             should_alert = self.key_stats[api_key].record_failure("invalid_response")
                             if should_alert:
-                                logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية", key_status="consecutive_failures")
-                                console.print(f"[bold yellow]⚠️ تنبيه: المفتاح {api_key[:10]} فشل 3 مرات متتالية ولكنه لا يزال قيد الاستخدام.[/bold yellow]")
+                                logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times", key_status="consecutive_failures")
+                                console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times but remains in use.[/bold yellow]")
                             
                     elif response.status == 429:
-                        logger.warning(f"تجاوز حد المعدل للمفتاح {api_key[:10]}... انتظار")
+                        logger.warning(f"Rate limit exceeded for key {api_key[:10]}... waiting")
                         should_alert = self.key_stats[api_key].record_failure("rate_limit")
                         if should_alert:
-                            logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Rate Limit)", key_status="consecutive_failures")
-                            console.print(f"[bold yellow]⚠️ تنبيه: المفتاح {api_key[:10]} فشل 3 مرات متتالية بسبب حدود المعدل.[/bold yellow]")
+                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Rate Limit)", key_status="consecutive_failures")
+                            console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times due to rate limits.[/bold yellow]")
                         
                         # حظر المفتاح مؤقتاً
                         block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
@@ -535,41 +535,41 @@ class EnhancedGeminiAPI:
                         await asyncio.sleep(block_duration)
                         
                     elif response.status >= 500:
-                        logger.error(f"خطأ خادم Gemini: {response.status}")
+                        logger.error(f"Gemini server error: {response.status}")
                         should_alert = self.key_stats[api_key].record_failure("server_error")
                         if should_alert:
-                            logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Server Error)", key_status="consecutive_failures")
-                            console.print(f"[bold red]⚠️ تنبيه: المفتاح {api_key[:10]} يواجه أخطاء خادم متتالية![/bold red]")
+                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Server Error)", key_status="consecutive_failures")
+                            console.print(f"[bold red]⚠️ Alert: Key {api_key[:10]} is facing consecutive server errors![/bold red]")
                         await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
                         
                     else:
                         error_text = await response.text()
-                        logger.error(f"خطأ API غير متوقع: {response.status} - {error_text}")
+                        logger.error(f"Unexpected API error: {response.status} - {error_text}")
                         should_alert = self.key_stats[api_key].record_failure("api_error")
                         if should_alert:
-                            logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (API Error)", key_status="consecutive_failures")
-                            console.print(f"[bold red]⚠️ تنبيه: المفتاح {api_key[:10]} يواجه أخطاء غير متوقعة מתتالية![/bold red]")
+                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (API Error)", key_status="consecutive_failures")
+                            console.print(f"[bold red]⚠️ Alert: Key {api_key[:10]} is facing consecutive unexpected errors![/bold red]")
                         
                         # حظر المفتاح إذا كان الخطأ متعلق بالمفتاح نفسه
                         if response.status in [401, 403]:
                             self.blocked_keys[api_key] = time.time() + 3600  # حظر لمدة ساعة
                             
             except asyncio.TimeoutError:
-                logger.warning(f"انتهت مهلة طلب {request_type} (محاولة {attempt + 1})")
+                logger.warning(f"Request {request_type} timed out (attempt {attempt + 1})")
                 should_alert = self.key_stats[api_key].record_failure("timeout")
                 if should_alert:
-                    logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Timeout)", key_status="consecutive_failures")
-                    console.print(f"[bold yellow]⚠️ تنبيه: المفتاح {api_key[:10]} يواجه مهلة زمنية منتهية باستمرار.[/bold yellow]")
+                    logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Timeout)", key_status="consecutive_failures")
+                    console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} is consistently timing out.[/bold yellow]")
                 await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
                 
             except Exception as e:
-                logger.error(f"خطأ في طلب {request_type} (محاولة {attempt + 1}): {str(e)}")
+                logger.error(f"Error in {request_type} request (attempt {attempt + 1}): {str(e)}")
                 should_alert = self.key_stats[api_key].record_failure("exception")
                 if should_alert:
-                    logger.warning(f"تنبيه استخباراتي: المفتاح {api_key[:10]}... فشل 3 مرات متتالية (Exception)", key_status="consecutive_failures")
+                    logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Exception)", key_status="consecutive_failures")
                 await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
         
-        logger.error(f"فشل طلب {request_type} بعد {self.max_retries} محاولات")
+        logger.error(f"Request {request_type} failed after {self.max_retries} attempts")
         return None, 0.0, None
     
     def get_statistics_summary(self) -> Dict[str, Any]:
@@ -606,7 +606,7 @@ class EnhancedGeminiAPI:
             await self.session.close()
         if self.connector:
             await self.connector.close()
-        logger.info("تم تنظيف موارد Gemini API")
+        logger.info("Gemini API resources cleaned up")
 
 class ComprehensiveContentProcessor:
     """معالج المحتوى الشامل لضمان ترجمة كاملة لكل جزء"""
@@ -876,11 +876,11 @@ class CompleteTranslationEngine:
     async def translate_with_completion_guarantee(self, text: str, context: str = "") -> Optional[str]:
         """ترجمة مع ضمان الاكتمال الشامل لكل أجزاء النص"""
         
-        logger.info(f"بدء الترجمة الكاملة لنص من {len(text)} حرف")
+        logger.info(f"Starting complete translation for text of {len(text)} characters")
         
         # المرحلة 1: تحليل النص واكتشاف نوعه
         text_analysis = self.detect_text_genre_and_tone(text)
-        logger.info(f"تحليل النص: النوع={text_analysis['genre']}, النبرة={text_analysis['tone']}")
+        logger.info(f"Text analysis: Genre={text_analysis['genre']}, Tone={text_analysis['tone']}")
         
         # المرحلة 2: الترجمة الأولية الشاملة
         translation_prompt = self.create_complete_translation_prompt(text, context, text_analysis)
@@ -894,14 +894,14 @@ class CompleteTranslationEngine:
         initial_translation, response_time, api_key_used = initial_translation_result if initial_translation_result else (None, 0.0, None)
 
         if not initial_translation:
-            logger.error("فشل في الترجمة الأولى")
+            logger.error("Failed in initial translation")
             return None, 0.0, None
         
-        logger.info("تمت الترجمة الأولى، بدء فحص الاكتمال...")
+        logger.info("Initial translation done, starting completion check...")
         
         # المرحلة 3: فحص اكتمال الترجمة
         if self.content_processor.needs_completion_review(text, initial_translation):
-            quality_logger.warning("الترجمة غير مكتملة، بدء مراجعة الإكمال...")
+            quality_logger.warning("Incomplete translation detected, starting completion review...")
             
             # تحليل المشاكل
             issues = self.content_processor.detect_incomplete_translation(text, initial_translation)
@@ -946,10 +946,10 @@ class CompleteTranslationEngine:
                 # فحص إضافي للتأكد من الاكتمال
                 final_check = self.content_processor.detect_incomplete_translation(text, completed_translation)
                 if final_check['coverage_percentage'] > 90:
-                    logger.info("تم إكمال الترجمة بنجاح - نسبة التغطية مرتفعة")
+                    logger.info("Translation completed successfully - high coverage ratio")
                     final_translation = self.content_processor.convert_numbers_to_arabic(completed_translation)
                 else:
-                    quality_logger.warning("محاولة أخيرة لضمان الإكمال...")
+                    quality_logger.warning("Final attempt to guarantee completion...")
                     # محاولة أخيرة
                     final_completion_prompt = f"""مراجعة نهائية حاسمة:
 
@@ -977,7 +977,7 @@ class CompleteTranslationEngine:
             else:
                 final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
         else:
-            logger.info("الترجمة الأولى مكتملة وشاملة")
+            logger.info("Initial translation is complete and comprehensive")
             final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
         
         # المرحلة 4: تحديث السياق والمصطلحات
@@ -996,11 +996,11 @@ class CompleteTranslationEngine:
     async def translate_with_comprehensive_review(self, text: str, context: str = "") -> Optional[str]:
         """ترجمة شاملة مع مراجعة متعددة المراحل لضمان عدم ترك أي محتوى أجنبي"""
         
-        logger.info(f"بدء الترجمة الشاملة لنص من {len(text)} حرف")
+        logger.info(f"Starting comprehensive translation for text of {len(text)} characters")
         
         # المرحلة 1: تحليل النص واكتشاف نوعه
         text_analysis = self.detect_text_genre_and_tone(text)
-        logger.info(f"تحليل النص: النوع={text_analysis['genre']}, النبرة={text_analysis['tone']}")
+        logger.info(f"Text analysis: Genre={text_analysis['genre']}, Tone={text_analysis['tone']}")
         
         # المرحلة 2: الترجمة الأولية السياقية
         translation_prompt = self.create_complete_translation_prompt(text, context, text_analysis)
@@ -1014,14 +1014,14 @@ class CompleteTranslationEngine:
         initial_translation, response_time, api_key_used = initial_translation_result if initial_translation_result else (None, 0.0, None)
 
         if not initial_translation:
-            logger.error("فشل في الترجمة الأولى")
+            logger.error("Failed in initial translation")
             return None, 0.0, None
         
-        logger.info("تمت الترجمة الأولى، بدء المراجعة الشاملة...")
+        logger.info("Initial translation done, starting comprehensive review...")
         
         # المرحلة 3: فحص شامل للمحتوى الأجنبي
         if self.content_processor.has_any_foreign_content(initial_translation):
-            quality_logger.warning("تم العثور على محتوى أجنبي، بدء التصحيح الشامل...")
+            quality_logger.warning("Foreign content found, starting comprehensive correction...")
             
             # مراجعة شاملة لإزالة أي محتوى أجنبي
             comprehensive_review_prompt = f"""أنت مراجع ترجمة خبير. مهمتك مراجعة الترجمة وضمان عدم وجود أي محتوى أجنبي.
@@ -1056,10 +1056,10 @@ class CompleteTranslationEngine:
             if corrected_translation:
                 # فحص إضافي
                 if not self.content_processor.has_any_foreign_content(corrected_translation):
-                    logger.info("تم تصحيح الترجمة بنجاح - خالية من المحتوى الأجنبي")
+                    logger.info("Translation corrected successfully - free of foreign content")
                     final_translation = self.content_processor.convert_numbers_to_arabic(corrected_translation)
                 else:
-                    quality_logger.warning("ما زال هناك محتوى أجنبي، محاولة تصحيح نهائية...")
+                    quality_logger.warning("Foreign content still exists, final correction attempt...")
                     # محاولة تصحيح نهائية مكثفة
                     final_correction_prompt = f"""مراجعة نهائية حاسمة: 
 
@@ -1084,7 +1084,7 @@ class CompleteTranslationEngine:
             else:
                 final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
         else:
-            logger.info("الترجمة الأولى خالية من المحتوى الأجنبي")
+            logger.info("Initial translation is free of foreign content")
             final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
         
         # المرحلة 4: تحديث السياق والمصطلحات
@@ -1134,7 +1134,7 @@ class CompleteTranslationEngine:
                         arabic = arabic.strip()
                         if english and arabic and len(english) > 2:
                             self.terminology_database[english] = arabic
-                            logger.info(f"تم حفظ مصطلح: {english} ← {arabic}")
+                            logger.info(f"Term saved: {english} ← {arabic}")
                     except:
                         continue
 
@@ -1196,7 +1196,7 @@ class ProfessionalDocumentProcessor:
     def extract_pdf_with_precision(file_path: str) -> Dict[str, Any]:
         """استخراج دقيق للنص مع الحفاظ على البنية"""
         
-        logger.info(f"بدء معالجة ملف PDF: {file_path}")
+        logger.info(f"Starting processing of PDF file: {file_path}")
         
         try:
             with open(file_path, 'rb') as file:
@@ -1270,7 +1270,7 @@ class ProfessionalDocumentProcessor:
                         full_text += page_text + "\n\n"
                         
                     except Exception as e:
-                        logger.warning(f"خطأ في معالجة الصفحة {page_num + 1}: {str(e)}")
+                        logger.warning(f"Error processing page {page_num + 1}: {str(e)}")
                         continue
                 
                 # إضافة الفصل الأخير
@@ -1281,16 +1281,16 @@ class ProfessionalDocumentProcessor:
                 if not document_info['chapters']:
                     document_info['chapters'] = ProfessionalDocumentProcessor.smart_text_division(full_text)
                 
-                logger.info(f"تم استخراج {len(document_info['chapters'])} فصل من {document_info['total_pages']} صفحة")
+                logger.info(f"Extracted {len(document_info['chapters'])} chapters from {document_info['total_pages']} pages")
                 
                 # إحصائيات
                 total_words = sum(ch['word_count'] for ch in document_info['chapters'])
-                logger.info(f"إجمالي الكلمات: {total_words:,}")
+                logger.info(f"Total words: {total_words:,}")
                 
                 return document_info
                 
         except Exception as e:
-            logger.error(f"خطأ في قراءة ملف PDF: {str(e)}")
+            logger.error(f"Error reading PDF file: {str(e)}")
             raise
     
     @staticmethod
@@ -1357,7 +1357,7 @@ class EnhancedDocumentGenerator:
     async def create_table_of_contents(chapters: List[Dict[str, Any]], 
                                      api_manager: EnhancedGeminiAPI) -> List[Dict[str, str]]:
         """إنشاء فهرس منظم بدون تكرار وترجمة واحدة لكل عنوان"""
-        logger.info("إنشاء فهرس منظم بدون تكرار...")
+        logger.info("Creating an organized table of contents without duplicates...")
         
         table_of_contents = []
         processed_titles = set()  # لمنع التكرار
@@ -1428,7 +1428,7 @@ class EnhancedDocumentGenerator:
                 'arabic_title': arabic_title
             })
         
-        logger.info(f"تم إنشاء فهرس بدون تكرار يحتوي على {len(table_of_contents)} عنوان فريد")
+        logger.info(f"Created table of contents with {len(table_of_contents)} unique titles")
         
         return table_of_contents
     
@@ -1440,7 +1440,7 @@ class EnhancedDocumentGenerator:
                             table_of_contents: List[Dict[str, str]] = None) -> str:
         """إنشاء مستند رواية احترافي مع فهرس في صفحة منفصلة وأحجام خط محددة"""
         
-        logger.info(f"إنشاء مستند الرواية مع فهرس منفصل: {output_path}")
+        logger.info(f"Creating novel document with separate TOC: {output_path}")
         
         try:
             # إنشاء مجلد الإخراج إذا لم يكن موجوداً
@@ -1608,14 +1608,14 @@ class EnhancedDocumentGenerator:
             # حفظ المستند
             doc.save(output_path)
             
-            logger.info(f"تم إنشاء مستند الرواية مع تنسيق احترافي محسن بنجاح: {output_path}")
-            logger.info(f"أحجام الخط: النص الأساسي 14pt، العناوين 15pt")
-            logger.info(f"الفهرس: احترافي مع أرقام بالأحرف العربية")
-            logger.info(f"التنسيق: استغلال أمثل للمساحة مثل الروايات الاحترافية")
+            logger.info(f"Novel document created successfully with enhanced professional formatting: {output_path}")
+            logger.info(f"Font sizes: Body text 14pt, Titles 15pt")
+            logger.info(f"TOC: Professional with Arabic numerals")
+            logger.info(f"Formatting: Optimal space utilization like printed novels")
             return output_path
             
         except Exception as e:
-            logger.error(f"خطأ في إنشاء مستند الرواية: {str(e)}")
+            logger.error(f"Error creating novel document: {str(e)}")
             logger.error(traceback.format_exc())
             raise
     
@@ -1684,7 +1684,7 @@ class MasterTranslationSystem:
             'contextual_adaptations': 0
         }
         
-        logger.info("تم تهيئة النظام الرئيسي المحسن للترجمة عالية الجودة")
+        logger.info("Enhanced main system for high-quality translation initialized")
     
     def init_advanced_database(self):
         """إنشاء قاعدة بيانات متقدمة"""
@@ -1760,7 +1760,7 @@ class MasterTranslationSystem:
 
             conn.commit()
 
-        logger.info("تم إنشاء قاعدة البيانات المتقدمة وتوسيعها بالجداول الاستخباراتية")
+        logger.info("Advanced database created and extended with intelligence tables")
     
     def save_chapter_advanced(self, chapter_data: Dict[str, Any]):
         """حفظ متقدم للفصل مع جميع البيانات"""
@@ -1827,7 +1827,7 @@ class MasterTranslationSystem:
         from rich.table import Table
         from rich.panel import Panel
 
-        console.print("\n[bold cyan]🔍 جاري استخراج التحليلات الاستخباراتية من السجلات...[/bold cyan]")
+        console.print("\n[bold cyan]🔍 Extracting intelligence analytics from logs...[/bold cyan]")
 
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             cursor = conn.cursor()
@@ -1843,17 +1843,17 @@ class MasterTranslationSystem:
                 genre_stats = cursor.fetchall()
 
                 if genre_stats:
-                    table_genre = Table(title="[bold]متوسط وقت الترجمة حسب النوع الأدبي[/bold]", show_header=True, header_style="bold magenta")
-                    table_genre.add_column("النوع الأدبي", justify="right")
-                    table_genre.add_column("متوسط الوقت (ثانية)", justify="center")
-                    table_genre.add_column("عدد الفصول", justify="center")
+                    table_genre = Table(title="[bold]Average Translation Time by Genre[/bold]", show_header=True, header_style="bold magenta")
+                    table_genre.add_column("Genre", justify="right")
+                    table_genre.add_column("Avg Time (s)", justify="center")
+                    table_genre.add_column("Chapters", justify="center")
 
                     for genre, avg_duration, count in genre_stats:
                         table_genre.add_row(str(genre), f"{avg_duration:.2f}", str(count))
 
                     console.print(table_genre)
                 else:
-                    console.print("[dim]لا توجد بيانات كافية لتحليل الأنواع الأدبية.[/dim]")
+                    console.print("[dim]Not enough data to analyze literary genres.[/dim]")
 
                 # 2. تحليل الساعات الأكثر استجابة (متوسط وقت الاستجابة لكل ساعة)
                 cursor.execute('''
@@ -1866,10 +1866,10 @@ class MasterTranslationSystem:
                 hour_stats = cursor.fetchall()
 
                 if hour_stats:
-                    table_hour = Table(title="[bold]أنماط الأداء: أسرع ساعات الاستجابة[/bold]", show_header=True, header_style="bold green")
-                    table_hour.add_column("الساعة (بتوقيت الخادم)", justify="center")
-                    table_hour.add_column("متوسط سرعة الاستجابة (ثانية)", justify="center")
-                    table_hour.add_column("عدد العمليات", justify="center")
+                    table_hour = Table(title="[bold]Performance Patterns: Fastest Response Hours[/bold]", show_header=True, header_style="bold green")
+                    table_hour.add_column("Hour (Server Time)", justify="center")
+                    table_hour.add_column("Avg Response (s)", justify="center")
+                    table_hour.add_column("Operations", justify="center")
 
                     for hour, avg_duration, count in hour_stats:
                         table_hour.add_row(f"{hour}:00", f"{avg_duration:.2f}", str(count))
@@ -1878,16 +1878,16 @@ class MasterTranslationSystem:
 
                     # استنتاج ذكي
                     best_hour = hour_stats[0][0]
-                    console.print(Panel(f"[bold green]💡 استنتاج ذكي:[/bold green] أفضل وقت لاستخدام النظام هو حوالي الساعة [bold]{best_hour}:00[/bold] حيث تكون استجابة الـ API في أسرع حالاتها.", title="نصيحة أداء"))
+                    console.print(Panel(f"[bold green]💡 Smart Insight:[/bold green] The best time to use the system is around [bold]{best_hour}:00[/bold] as the API response is at its fastest.", title="Performance Tip"))
                 else:
-                    console.print("[dim]لا توجد بيانات كافية لتحليل أفضل ساعات الاستجابة.[/dim]")
+                    console.print("[dim]Not enough data to analyze the best response hours.[/dim]")
 
             except Exception as e:
-                console.print(f"[bold red]حدث خطأ أثناء استخراج التحليلات الاستخباراتية: {str(e)}[/bold red]")
+                console.print(f"[bold red]Error extracting intelligence analytics: {str(e)}[/bold red]")
 
     def _load_completed_chapters_from_db(self) -> Dict[str, Any]:
         """تحميل الفصول المكتملة مسبقاً من قاعدة البيانات"""
-        logger.info("فحص قاعدة البيانات عن فصول مترجمة مسبقاً...")
+        logger.info("Checking database for previously translated chapters...")
 
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
@@ -1901,9 +1901,9 @@ class MasterTranslationSystem:
                 completed_chapters[chapter_data['id']] = chapter_data
             
             if completed_chapters:
-                logger.info(f"تم العثور على {len(completed_chapters)} فصل مترجم مسبقاً. سيتم تخطي ترجمتهم.")
+                logger.info(f"Found {len(completed_chapters)} previously translated chapters. Skipping translation for them.")
             else:
-                logger.info("لم يتم العثور على فصول مترجمة مسبقاً.")
+                logger.info("No previously translated chapters found.")
             
             return completed_chapters
 
@@ -1913,8 +1913,8 @@ class MasterTranslationSystem:
         start_time = time.time()
         chapter_id = chapter['id']
         
-        logger.info(f"بدء الترجمة الشاملة للفصل: {chapter['title']}")
-        quality_logger.info(f"الفصل {chapter_id}: بدء المعالجة المحسنة")
+        logger.info(f"Starting comprehensive translation for chapter: {chapter['title']}")
+        quality_logger.info(f"Chapter {chapter_id}: Enhanced processing started")
         
         try:
             # إعداد البيانات الأولية
@@ -1932,7 +1932,7 @@ class MasterTranslationSystem:
             
             self.save_chapter_advanced(chapter)
             self.log_operation(chapter_id, "translation_start", "info", 
-                             f"بدء ترجمة فصل من {chapter['word_count']} كلمة - النوع: {text_analysis['genre']}, النبرة: {text_analysis['tone']}")
+                             f"Started translating chapter of {chapter['word_count']} words - Genre: {text_analysis['genre']}, Tone: {text_analysis['tone']}")
             
             # الترجمة الشاملة مع المراجعة
             translation_context = f"هذا الفصل بعنوان '{chapter['title']}' من رواية أدبية"
@@ -1977,7 +1977,7 @@ class MasterTranslationSystem:
                 # تسجيل النجاح في السجلات العادية
                 self.log_operation(
                     chapter_id, "translation_complete", "success",
-                    f"تمت الترجمة في {translation_time:.2f}ث، النوع: {text_analysis['genre']}, التصحيحات: {corrections_count}",
+                    f"Translation completed in {translation_time:.2f}s, Genre: {text_analysis['genre']}, Corrections: {corrections_count}",
                     translation_time,
                     api_key_used if api_key_used else ""
                 )
@@ -1989,12 +1989,12 @@ class MasterTranslationSystem:
                 
                 if foreign_content_detected:
                     self.translation_stats['foreign_content_corrections'] += 1
-                    quality_logger.warning(f"الفصل {chapter_id}: تم تطبيق تصحيحات على المحتوى الأجنبي")
+                    quality_logger.warning(f"Chapter {chapter_id}: Applied corrections for foreign content")
                 else:
-                    quality_logger.info(f"الفصل {chapter_id}: خالٍ من المحتوى الأجنبي")
+                    quality_logger.info(f"Chapter {chapter_id}: Free of foreign content")
                 
-                logger.info(f"تم إنهاء ترجمة الفصل {chapter['title']} بنجاح - "
-                          f"الوقت: {translation_time:.2f}ث، النوع: {text_analysis['genre']}")
+                logger.info(f"Translation finished for chapter {chapter['title']} successfully - "
+                          f"Time: {translation_time:.2f}s, Genre: {text_analysis['genre']}")
                 
                 return chapter
                 
@@ -2004,9 +2004,9 @@ class MasterTranslationSystem:
                 self.save_chapter_advanced(chapter)
                 
                 self.log_operation(chapter_id, "translation_failed", "error",
-                                 "فشل في الحصول على ترجمة من API")
+                                 "Failed to get translation from API")
                 
-                logger.error(f"فشل في ترجمة الفصل: {chapter['title']}")
+                logger.error(f"Translation failed for chapter: {chapter['title']}")
                 return chapter
                 
         except Exception as e:
@@ -2017,7 +2017,7 @@ class MasterTranslationSystem:
             self.save_chapter_advanced(chapter)
             self.log_operation(chapter_id, "translation_error", "error", error_message)
             
-            logger.error(f"خطأ في ترجمة الفصل {chapter['title']}: {error_message}")
+            logger.error(f"Error translating chapter {chapter['title']}: {error_message}")
             logger.error(traceback.format_exc())
             
             return chapter
@@ -2035,9 +2035,9 @@ class MasterTranslationSystem:
         output_file = output_path_obj / f"{pdf_name}_رواية_مترجمة.docx"
         
         logger.info("=" * 100)
-        logger.info("بدء المعالجة الشاملة المحسنة للرواية مع الفهرس المنفصل")
-        logger.info(f"الملف المصدر: {pdf_path}")
-        logger.info(f"الملف الهدف: {output_file}")
+        logger.info("Starting enhanced comprehensive processing of the novel with a separate TOC")
+        logger.info(f"Source file: {pdf_path}")
+        logger.info(f"Target file: {output_file}")
         logger.info("=" * 100)
         
         self.translation_stats['translation_start_time'] = time.time()
@@ -2047,7 +2047,7 @@ class MasterTranslationSystem:
             self.analyze_and_display_intelligence()
 
             # المرحلة 1: استخراج وتحليل المستند
-            logger.info("📖 المرحلة 1: استخراج وتحليل المستند...")
+            logger.info("📖 Phase 1: Extracting and analyzing the document...")
             document_structure = self.document_processor.extract_pdf_with_precision(pdf_path)
             
             # تحميل الفصول المكتملة مسبقاً من قاعدة البيانات
@@ -2059,23 +2059,21 @@ class MasterTranslationSystem:
             self.translation_stats['total_characters'] = sum(len(ch.get('content', '')) for ch in chapters)
             
             if not book_title:
-                book_title = document_structure.get('title', 'الرواية المترجمة') or 'الرواية المترجمة'
+                book_title = document_structure.get('title', 'Translated Novel') or 'Translated Novel'
             if not author:
-                author = document_structure.get('author', 'مؤلف غير محدد') or 'مؤلف غير محدد'
+                author = document_structure.get('author', 'Unknown Author') or 'Unknown Author'
             
-            logger.info(f"📊 تم استخراج {len(chapters)} فصل")
-            logger.info(f"📊 إجمالي الكلمات: {self.translation_stats['total_words']:,}")
-            logger.info(f"📊 إجمالي الأحرف: {self.translation_stats['total_characters']:,}")
-            logger.info(f"📚 عنوان الكتاب: {book_title}")
-            logger.info(f"✍️ المؤلف: {author}")
+            logger.info(f"📊 Extracted {len(chapters)} chapters")
+            logger.info(f"📊 Total words: {self.translation_stats['total_words']:,}")
+            logger.info(f"📊 Total characters: {self.translation_stats['total_characters']:,}")
+            logger.info(f"📚 Book Title: {book_title}")
+            logger.info(f"✍️ Author: {author}")
             
             # المرحلة 2: ترجمة شاملة مع مراجعة متعددة المراحل
-            logger.info("🔄 المرحلة 2: بدء الترجمة الشاملة مع ضمان عدم ترك أي محتوى أجنبي...")
+            logger.info("🔄 Phase 2: Starting comprehensive translation with strict no-foreign-content guarantee...")
             
             all_processed_chapters = []
             
-            from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
-
             with Progress(
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(complete_style="green", finished_style="bold green"),
@@ -2083,14 +2081,14 @@ class MasterTranslationSystem:
                 TimeRemainingColumn(),
                 console=console
             ) as progress:
-                translation_task = progress.add_task("[cyan]ترجمة الفصول...", total=len(chapters))
+                translation_task = progress.add_task("[cyan]Translating chapters...", total=len(chapters))
                 
                 for i, chapter in enumerate(chapters):
                     logger.info("-" * 50)
                     
                     # التحقق من وجود ترجمة سابقة للفصل
                     if chapter['id'] in previously_completed:
-                        logger.info(f"⏭️ تخطي الفصل {i+1}/{len(chapters)}: '{chapter['title']}' (مترجم مسبقاً).")
+                        logger.info(f"⏭️ Skipping chapter {i+1}/{len(chapters)}: '{chapter['title']}' (previously translated).")
 
                         completed_chapter_info = previously_completed[chapter['id']]
                         all_processed_chapters.append(completed_chapter_info)
@@ -2100,16 +2098,16 @@ class MasterTranslationSystem:
                         self.translation_stats['completed_chapters'] += 1
                         self.translation_stats['translated_words'] += completed_chapter_info.get('word_count', 0)
 
-                        progress.update(translation_task, advance=1, description=f"[green]تم التخطي (مترجم مسبقاً): {chapter['title']}")
+                        progress.update(translation_task, advance=1, description=f"[green]Skipped (Cached): {chapter['title']}")
                         continue
 
-                    logger.info(f"📝 ترجمة الفصل {i+1}/{len(chapters)}: {chapter['title']}")
-                    progress.update(translation_task, description=f"[yellow]جاري ترجمة: {chapter['title']}")
+                    logger.info(f"📝 Translating chapter {i+1}/{len(chapters)}: {chapter['title']}")
+                    progress.update(translation_task, description=f"[yellow]Translating: {chapter['title']}")
                     
                     result = await self.translate_chapter_comprehensively(chapter)
                     all_processed_chapters.append(result)
                     
-                    progress.update(translation_task, advance=1, description=f"[green]تم الانتهاء من: {chapter['title']}")
+                    progress.update(translation_task, advance=1, description=f"[green]Completed: {chapter['title']}")
 
                     elapsed_time = time.time() - self.translation_stats['translation_start_time']
                     chapters_done = i + 1
@@ -2121,39 +2119,39 @@ class MasterTranslationSystem:
                         # Only logging summary stats instead of visual progress bar numbers
                         successful = sum(1 for ch in all_processed_chapters if ch['status'] == 'completed')
                         if successful > 0 and chapters_done % 5 == 0:
-                            logger.info(f"✅ إحصائية: الفصول المكتملة {successful}")
+                            logger.info(f"✅ Statistics: Completed chapters {successful}")
             
             # المرحلة 3: التحقق النهائي من الجودة
-            logger.info("🔍 المرحلة 3: التحقق النهائي من الجودة...")
+            logger.info("🔍 Phase 3: Final Quality Check...")
             
             successful_chapters = [ch for ch in all_processed_chapters if ch['status'] == 'completed']
             failed_chapters = [ch for ch in all_processed_chapters if ch['status'] in ['failed', 'error']]
             
             if failed_chapters:
-                logger.warning(f"⚠️  {len(failed_chapters)} فصل فشل في الترجمة:")
+                logger.warning(f"⚠️  {len(failed_chapters)} chapters failed to translate:")
                 for ch in failed_chapters:
                     logger.warning(f"   - {ch['title']}")
             
             chapters_with_foreign = [ch for ch in successful_chapters if ch.get('foreign_content_detected', False)]
             if chapters_with_foreign:
-                quality_logger.warning(f"تم تطبيق تصحيحات على المحتوى الأجنبي في {len(chapters_with_foreign)} فصل")
+                quality_logger.warning(f"Foreign content corrections applied in {len(chapters_with_foreign)} chapters")
             else:
-                quality_logger.info("جميع الفصول خالية من المحتوى الأجنبي")
+                quality_logger.info("All chapters are completely free of foreign content")
             
             # المرحلة 4: إنشاء فهرس منظم بدون تكرار
-            logger.info("📋 المرحلة 4: إنشاء فهرس منظم بدون تكرار...")
+            logger.info("📋 Phase 4: Creating organized table of contents without duplicates...")
             
             table_of_contents = await self.document_generator.create_table_of_contents(
                 successful_chapters, self.api_manager
             )
             
-            logger.info(f"تم إنشاء فهرس احترافي بدون أرقام صفحات يحتوي على {len(table_of_contents)} عنوان فريد")
+            logger.info(f"Professional TOC created with {len(table_of_contents)} unique titles (no page numbers)")
             
             # المرحلة 5: إنشاء مستند الرواية النهائي مع الفهرس المنفصل
-            logger.info("📝 المرحلة 5: إنشاء مستند الرواية النهائي مع التنسيق الاحترافي...")
-            logger.info("🎯 أحجام الخط: النص الأساسي 14pt، العناوين 15pt فقط")
-            logger.info("📄 الفهرس: احترافي بأرقام عربية مكتوبة")
-            logger.info("📐 التنسيق: استغلال أمثل للمساحة مثل الروايات المطبوعة")
+            logger.info("📝 Phase 5: Generating final novel document with professional formatting...")
+            logger.info("🎯 Font sizes: Body 14pt, Titles 15pt")
+            logger.info("📄 TOC: Professional with written Arabic numerals")
+            logger.info("📐 Layout: Optimized spacing mirroring printed novels")
             
             final_document_path = self.document_generator.create_novel_document(
                 successful_chapters, str(output_file), book_title, author, table_of_contents
@@ -2169,34 +2167,34 @@ class MasterTranslationSystem:
             
             # تقرير نهائي شامل
             logger.info("=" * 100)
-            logger.info("🎉 تمت معالجة الرواية بنجاح مع الفهرس المنفصل!")
+            logger.info("🎉 Novel processed successfully with a separate TOC!")
             logger.info("=" * 100)
-            logger.info(f"📖 عنوان الرواية: {book_title}")
-            logger.info(f"✍️  المؤلف: {author}")
-            logger.info(f"📄 إجمالي الفصول: {len(chapters)}")
-            logger.info(f"✅ فصول مترجمة بنجاح: {total_successful}")
-            logger.info(f"⏭️ فصول تم تخطيها (مترجمة سابقاً): {self.translation_stats['skipped_chapters']}")
-            logger.info(f"❌ فصول فاشلة: {total_failed}")
-            logger.info(f"📊 إجمالي الكلمات المترجمة: {translated_words:,}")
-            logger.info(f"⏱️  إجمالي الوقت: {total_time/60:.1f} دقيقة")
-            logger.info(f"🚀 معدل الترجمة: {words_per_minute:.0f} كلمة/دقيقة")
+            logger.info(f"📖 Novel Title: {book_title}")
+            logger.info(f"✍️  Author: {author}")
+            logger.info(f"📄 Total Chapters: {len(chapters)}")
+            logger.info(f"✅ Successfully Translated: {total_successful}")
+            logger.info(f"⏭️ Skipped (Previously Translated): {self.translation_stats['skipped_chapters']}")
+            logger.info(f"❌ Failed Chapters: {total_failed}")
+            logger.info(f"📊 Total Words Translated: {translated_words:,}")
+            logger.info(f"⏱️  Total Time: {total_time/60:.1f} minutes")
+            logger.info(f"🚀 Translation Rate: {words_per_minute:.0f} words/minute")
             
             # إحصائيات التحسينات
             logger.info("=" * 50)
-            logger.info("🔧 إحصائيات التحسينات المطبقة:")
-            logger.info(f"   🌍 تصحيحات المحتوى الأجنبي: {self.translation_stats['foreign_content_corrections']}")
-            logger.info(f"   📖 تكيفات سياقية (نوع ونبرة): {self.translation_stats['contextual_adaptations']}")
-            logger.info(f"   🔑 مفاتيح API متعددة: {len(self.api_manager.api_keys)} مفاتيح")
-            logger.info(f"   📚 مصطلحات محفوظة: {len(self.translation_engine.terminology_database)} مصطلح")
-            logger.info(f"   📋 فهرس احترافي: {len(table_of_contents)} فصل بأرقام عربية مكتوبة")
-            logger.info(f"   🎯 أحجام الخط موحدة: النص 14pt، العناوين 15pt فقط")
-            logger.info(f"   📐 تنسيق محسن: استغلال أمثل للمساحة، مسافات مدروسة")
-            
-            logger.info(f"📁 الرواية النهائية مع التنسيق الاحترافي: {final_document_path}")
+            logger.info("🔧 Applied Enhancements Statistics:")
+            logger.info(f"   🌍 Foreign Content Corrections: {self.translation_stats['foreign_content_corrections']}")
+            logger.info(f"   📖 Contextual Adaptations (Genre/Tone): {self.translation_stats['contextual_adaptations']}")
+            logger.info(f"   🔑 Multiple API Keys Used: {len(self.api_manager.api_keys)} keys")
+            logger.info(f"   📚 Saved Terms: {len(self.translation_engine.terminology_database)} terms")
+            logger.info(f"   📋 Professional TOC: {len(table_of_contents)} chapters with Arabic numerals")
+            logger.info(f"   🎯 Uniform Font Sizes: Body 14pt, Titles 15pt")
+            logger.info(f"   📐 Enhanced Formatting: Optimized space, calculated spacing")
+
+            logger.info(f"📁 Final professionally formatted novel: {final_document_path}")
             logger.info("=" * 100)
             
-            quality_logger.info("تقرير الجودة النهائي:")
-            quality_logger.info(f"إجمالي التصحيحات المطبقة: {sum(ch.get('corrections_applied', 0) for ch in successful_chapters)}")
+            quality_logger.info("Final Quality Report:")
+            quality_logger.info(f"Total corrections applied: {sum(ch.get('corrections_applied', 0) for ch in successful_chapters)}")
             
             # تصنيف الفصول حسب النوع
             genre_counts = {}
@@ -2207,18 +2205,18 @@ class MasterTranslationSystem:
                 genre_counts[genre] = genre_counts.get(genre, 0) + 1
                 tone_counts[tone] = tone_counts.get(tone, 0) + 1
             
-            quality_logger.info("توزيع الأنواع الأدبية:")
+            quality_logger.info("Literary Genre Distribution:")
             for genre, count in genre_counts.items():
-                quality_logger.info(f"  {genre}: {count} فصل")
+                quality_logger.info(f"  {genre}: {count} chapters")
             
-            quality_logger.info("توزيع النبرات العاطفية:")
+            quality_logger.info("Emotional Tone Distribution:")
             for tone, count in tone_counts.items():
-                quality_logger.info(f"  {tone}: {count} فصل")
+                quality_logger.info(f"  {tone}: {count} chapters")
             
             return final_document_path
             
         except Exception as e:
-            logger.error(f"خطأ كارثي في معالجة الرواية: {str(e)}")
+            logger.error(f"Fatal error during novel processing: {str(e)}")
             logger.error(traceback.format_exc())
             raise
 
@@ -2228,37 +2226,37 @@ def validate_input_paths(input_path: str, output_dir: str) -> Tuple[bool, str]:
     
     # التحقق من وجود ملف الإدخال
     if not os.path.exists(input_path):
-        return False, f"ملف الإدخال غير موجود: {input_path}"
+        return False, f"Input file not found: {input_path}"
     
     # التحقق من أن الملف هو PDF
     if not input_path.lower().endswith('.pdf'):
-        return False, "الملف يجب أن يكون من نوع PDF"
+        return False, "File must be a PDF"
     
     # التحقق من إمكانية إنشاء مجلد الإخراج
     try:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        return False, f"لا يمكن إنشاء مجلد الإخراج: {str(e)}"
+        return False, f"Cannot create output directory: {str(e)}"
     
-    return True, "مسارات صحيحة"
+    return True, "Paths are valid"
 
 
 async def main():
     """الدالة الرئيسية للنظام المحسن مع الفهرس المنفصل"""
     
-    print("🚀 نظام الترجمة الشامل المحسن - للروايات والنصوص الأدبية مع الفهرس المنفصل")
+    print("🚀 Enhanced Comprehensive Translation System - For Novels & Literature with Separate TOC")
     print("=" * 90)
-    print("✨ المميزات المحسنة:")
-    print("   🔑 مفاتيح API متعددة لضمان الاستمرارية")
-    print("   🌍 إزالة شاملة لأي محتوى أجنبي (كلمات وأرقام)")
-    print("   📖 ترجمة سياقية حسب نوع النص ونبرته العاطفية")
-    print("   🎭 تكيف مع الأنواع الأدبية (شعر، حوار، سرد، نثر)")
-    print("   💫 تكيف مع النبرات العاطفية (حزين، مفرح، درامي، محايد)")
-    print("   📚 حفظ وإدارة ذكية للمصطلحات")
-    print("   📋 إنشاء فهرس احترافي مثل الكتب الحقيقية - أسماء الفصول فقط!")
-    print("   📄 إخراج نهائي للروايات - فهرس احترافي + نص منظم")
-    print("   🎯 أحجام خط محددة: النص 14pt، العناوين 15pt")
-    print("   🔍 مراجعة متعددة المراحل لضمان أعلى جودة")
+    print("✨ Enhanced Features:")
+    print("   🔑 Multiple API keys for continuity")
+    print("   🌍 Complete removal of foreign content (words and numbers)")
+    print("   📖 Contextual translation based on genre and emotional tone")
+    print("   🎭 Adaptation to literary genres (poetry, drama, narrative, prose)")
+    print("   💫 Adaptation to emotional tones (melancholic, joyful, dramatic, neutral)")
+    print("   📚 Smart terminology saving and management")
+    print("   📋 Creation of professional book-like TOC - Chapter names only!")
+    print("   📄 Final output for novels - Professional TOC + Structured text")
+    print("   🎯 Specific font sizes: Body 14pt, Titles 15pt")
+    print("   🔍 Multi-stage review to ensure highest quality")
     print("=" * 90)
     
     # إنشاء النظام المحسن
@@ -2268,23 +2266,23 @@ async def main():
     input_path = "/root/Downloads/teanasost/input/1p.pdf"
     output_dir = "/root/Downloads/teanasost/output"
     
-    print(f"\n📁 معلومات المسارات:")
-    print(f"مسار الإدخال: {input_path}")
-    print(f"مجلد الإخراج: {output_dir}")
+    print(f"\n📁 Path Information:")
+    print(f"Input Path: {input_path}")
+    print(f"Output Directory: {output_dir}")
     
     # التحقق من صحة المسارات
     is_valid, validation_message = validate_input_paths(input_path, output_dir)
     
     if not is_valid:
-        print(f"\n❌ خطأ في المسارات: {validation_message}")
+        print(f"\n❌ Path Error: {validation_message}")
         return
     
     print(f"✅ {validation_message}")
     
     # معلومات إضافية اختيارية
-    print(f"\n📚 معلومات الرواية (اختيارية):")
-    book_title = input("عنوان الرواية (Enter للتخطي): ").strip()
-    author = input("اسم المؤلف (Enter للتخطي): ").strip()
+    print(f"\n📚 Novel Information (Optional):")
+    book_title = input("Novel Title (Enter to skip): ").strip()
+    author = input("Author Name (Enter to skip): ").strip()
     
     if not book_title:
         book_title = None
@@ -2292,14 +2290,14 @@ async def main():
         author = None
     
     try:
-        print("\n🔄 بدء عملية الترجمة الشاملة المحسنة مع الفهرس المنفصل...")
-        print("🌟 النظام المحسن يضمن:")
-        print("   • ترجمة كل كلمة وحرف ورقم في النص")
-        print("   • تكيف سياقي حسب نوع النص العاطفي")
-        print("   • إزالة تامة لأي محتوى أجنبي")
-        print("   • إنشاء فهرس احترافي مثل الكتب - أسماء الفصول فقط")
-        print("   • أحجام خط محددة: النص 14pt، العناوين 15pt")
-        print("   • إخراج رواية نظيفة جاهزة للقراءة")
+        print("\n🔄 Starting enhanced comprehensive translation process with separate TOC...")
+        print("🌟 Enhanced System Guarantees:")
+        print("   • Translation of every single word, letter, and number in text")
+        print("   • Contextual adaptation based on emotional text type")
+        print("   • Complete removal of any foreign content")
+        print("   • Professional book-like TOC creation - Chapter names only")
+        print("   • Specific font sizes: Body 14pt, Titles 15pt")
+        print("   • Clean, ready-to-read novel output")
         print("-" * 90)
         
         # تشغيل النظام الكامل المحسن
@@ -2307,29 +2305,29 @@ async def main():
             input_path, output_dir, book_title, author
         )
         
-        print(f"\n🎉 تم إنشاء الرواية المترجمة مع الفهرس الاحترافي بنجاح!")
-        print(f"📄 الرواية النهائية: {final_document}")
-        print(f"📋 الرواية تحتوي على فهرس احترافي مثل الكتب الحقيقية!")
-        print(f"🚫 الفهرس: أسماء الفصول فقط بدون أرقام صفحات!")
-        print(f"🎯 أحجام الخط: النص الأساسي 14pt، العناوين 15pt فقط!")
-        print(f"📐 التنسيق: استغلال أمثل للمساحة مثل الروايات المطبوعة!")
+        print(f"\n🎉 Translated novel with professional TOC created successfully!")
+        print(f"📄 Final Novel: {final_document}")
+        print(f"📋 Novel contains a professional TOC like real printed books!")
+        print(f"🚫 TOC: Chapter names only without page numbers!")
+        print(f"🎯 Font sizes: Body text 14pt, Titles 15pt only!")
+        print(f"📐 Formatting: Optimal space utilization like printed novels!")
         
         # عرض ملخص الإنجازات
         if system.translation_stats['foreign_content_corrections'] > 0:
-            print(f"\n🔧 تم تطبيق {system.translation_stats['foreign_content_corrections']} تصحيح للمحتوى الأجنبي")
+            print(f"\n🔧 Applied {system.translation_stats['foreign_content_corrections']} foreign content corrections")
         
         if system.translation_stats['contextual_adaptations'] > 0:
-            print(f"📖 تم تطبيق {system.translation_stats['contextual_adaptations']} تكيف سياقي")
+            print(f"📖 Applied {system.translation_stats['contextual_adaptations']} contextual adaptations")
         
-        print(f"📚 تم حفظ {len(system.translation_engine.terminology_database)} مصطلح في قاعدة البيانات")
+        print(f"📚 Saved {len(system.translation_engine.terminology_database)} terms to database")
         
     except KeyboardInterrupt:
-        print("\n⏹️ تم إيقاف العملية بواسطة المستخدم")
-        print("💾 البيانات المحفوظة يمكن استكمالها لاحقاً")
+        print("\n⏹️ Process stopped by user")
+        print("💾 Saved data can be resumed later")
         
     except Exception as e:
-        print(f"\n❌ حدث خطأ فادح غير متوقع: {str(e)}")
-        logger.error(f"خطأ في main: {str(e)}")
+        print(f"\n❌ Unexpected fatal error: {str(e)}")
+        logger.error(f"Error in main: {str(e)}")
         logger.error(traceback.format_exc())
 
 
@@ -2337,6 +2335,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 تم إنهاء البرنامج")
+        print("\n👋 Program terminated")
     except Exception as e:
-        print(f"خطأ غير متوقع على المستوى الأعلى: {str(e)}")
+        print(f"Unexpected top-level error: {str(e)}")
