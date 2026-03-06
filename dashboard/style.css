@@ -132,18 +132,31 @@ body {
 }
 
 .left-col {
-    flex: 1;
-    max-width: 450px;
+    flex: 1.2;
+    min-width: 300px;
+}
+
+.center-col {
+    flex: 2;
+    min-width: 400px;
 }
 
 .right-col {
-    flex: 2;
+    flex: 1.8;
+    min-width: 350px;
 }
 
 .tile-row {
     display: flex;
     gap: var(--gap);
     flex-grow: 1;
+}
+
+.job-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
 }
 
 /* --- Terminal Windows --- */

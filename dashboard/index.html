@@ -48,13 +48,13 @@
     <!-- Tiling Window Manager Layout (Gaps) -->
     <main class="tiling-layout">
 
-        <!-- Left Column -->
+        <!-- Left Column: Neofetch & Upload -->
         <div class="tile-col left-col">
 
             <!-- System Stats Terminal -->
             <div class="window active-window">
                 <div class="window-bar">
-                    <span class="prompt"><span class="path">~/stats</span> <span class="cmd">❯</span> ./monitor</span>
+                    <span class="prompt"><span class="path">~/system</span> <span class="cmd">❯</span> neofetch --asost</span>
                     <span class="window-controls"><i class="fa-solid fa-circle"></i> <i class="fa-solid fa-circle"></i></span>
                 </div>
                 <div class="window-content blur-glass">
@@ -65,26 +65,21 @@
   / ___ |___/ // /_/ /___/ /   / /
  /_/  |_/____/ \____//____/   /_/
                     </div>
-                    <div class="stats-grid-term">
+
+                    <!-- Technical Quote instead of fake OS data -->
+                    <div style="border-left: 2px solid var(--term-green); padding-left: 10px; margin-bottom: 15px;">
+                        <div style="color: var(--text-primary); font-style: italic; font-size: 0.9em;">"Translation is not a matter of words only: it is a matter of making intelligible a whole culture."</div>
+                        <div style="color: var(--text-muted); font-size: 0.8em; margin-top: 4px;">— Anthony Burgess</div>
+                    </div>
+
+                    <div class="stats-grid-term" style="margin-bottom: 10px;">
                         <div class="stat-line">
-                            <span class="key keyword">books_translated:</span>
-                            <span class="val number">1204</span>
+                            <span class="key keyword">Engine:</span>
+                            <span class="val string">ASOST Translation Core v2.4</span>
                         </div>
                         <div class="stat-line">
-                            <span class="key keyword">pages_processed :</span>
-                            <span class="val number">452000</span>
-                        </div>
-                        <div class="stat-line">
-                            <span class="key keyword">active_threads  :</span>
-                            <span class="val number">12</span>
-                        </div>
-                        <div class="stat-line">
-                            <span class="key keyword">api_health      :</span>
-                            <span class="val string">"99.8%"</span>
-                        </div>
-                        <div class="stat-line">
-                            <span class="key keyword">last_job_id     :</span>
-                            <span class="val string">"A-9021"</span>
+                            <span class="key keyword">Model:</span>
+                            <span class="val string">Gemini-2.5-Pro</span>
                         </div>
                     </div>
                 </div>
@@ -95,8 +90,8 @@
                 <div class="window-bar">
                     <span class="prompt"><span class="path">~/upload</span> <span class="cmd">❯</span> ./dropzone</span>
                 </div>
-                <div class="window-content upload-zone-term blur-glass" id="drop-zone">
-                    <div class="border-box">
+                <div class="window-content upload-zone-term blur-glass" id="drop-zone" style="height: 100%; padding: 12px;">
+                    <div class="border-box" style="width: 100%;">
                         <p class="center-text comment">/* DROP PDF/DOCX FILES HERE */</p>
                         <p class="center-text glow-text"><i class="fa-solid fa-file-import fa-2x"></i></p>
                         <p class="center-text string">[ CLICK TO BROWSE ]</p>
@@ -107,58 +102,78 @@
 
         </div>
 
-        <!-- Right Column -->
-        <div class="tile-col right-col">
+        <!-- Center Column: Charts -->
+        <div class="tile-col center-col">
 
-            <!-- Top Right: Charts -->
-            <div class="window">
+            <!-- Top Chart: Throughput -->
+            <div class="window" style="height: 250px;">
                 <div class="window-bar">
                     <span class="prompt"><span class="path">~/throughput</span> <span class="cmd">❯</span> plot --last 7d</span>
                 </div>
-                <div class="window-content chart-container-term blur-glass">
+                <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px;">
                     <canvas id="throughputChart"></canvas>
                 </div>
             </div>
 
-            <!-- Bottom Right: Split vertically for API and Logs -->
-            <div class="tile-row">
+            <!-- Bottom Row in Center -->
+            <div class="tile-row" style="height: 200px;">
 
-                <!-- API Status -->
-                <div class="window api-window">
+                <!-- Win 3.5: API Doughnut -->
+                <div class="window" style="flex: 1;">
                     <div class="window-bar">
-                        <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> keys --status</span>
+                        <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> ./health</span>
                     </div>
-                    <div class="window-content api-content-term blur-glass">
-                        <table class="term-table">
-                            <thead>
-                                <tr>
-                                    <th>KEY_ID</th>
-                                    <th>STATUS</th>
-                                    <th>TPM</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><td>...KqxBAW5</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">12k</td></tr>
-                                <tr><td>...HzjRRO-</td><td class="warn"><i class="fa-solid fa-snowflake"></i> [COOL]</td><td class="number">30k</td></tr>
-                                <tr><td>...PlXAe19</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">5k</td></tr>
-                                <tr><td>...l1Q4C7p</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">0k</td></tr>
-                                <tr><td>...MnHC1ZC</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">2k</td></tr>
-                            </tbody>
-                        </table>
+                    <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px; position: relative;">
+                        <canvas id="apiChart"></canvas>
+                        <!-- Overlay Text inside doughnut -->
+                        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;">
+                            <div style="color: var(--term-green-bright); font-size: 1.2em; font-weight: bold;">60%</div>
+                            <div style="color: var(--text-muted); font-size: 0.7em;">ACTIVE</div>
+                        </div>
                     </div>
                 </div>
 
-                <!-- Main System Log -->
-                <div class="window log-window">
+                <!-- Win 3.6: Global Stats -->
+                <div class="window" style="flex: 1;">
                     <div class="window-bar">
-                        <span class="prompt"><span class="path">~/logs</span> <span class="cmd">❯</span> tail -f system.log</span>
+                        <span class="prompt"><span class="path">~/stats</span> <span class="cmd">❯</span> cat db.json</span>
                     </div>
-                    <div class="window-content terminal-body-term blur-glass" id="terminal-output">
-                        <!-- Logs injected via JS -->
+                    <div class="window-content blur-glass" style="padding: 16px;">
+                        <div class="stats-grid-term">
+                            <div class="stat-line"><span class="key keyword">books_translated:</span> <span class="val number">1204</span></div>
+                            <div class="stat-line"><span class="key keyword">pages_processed :</span> <span class="val number">452000</span></div>
+                            <div class="stat-line"><span class="key keyword">active_threads  :</span> <span class="val number">12</span></div>
+                            <div class="stat-line"><span class="key keyword">last_job_id     :</span> <span class="val string">"A-9021"</span></div>
+                        </div>
                     </div>
                 </div>
 
             </div>
+        </div>
+
+        <!-- Right Column: Logs & Jobs -->
+        <div class="tile-col right-col">
+
+            <!-- Top Right: Live Jobs (htop style) -->
+            <div class="window" style="flex: 1; max-height: 250px;">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/tasks</span> <span class="cmd">❯</span> htop --filter=trans</span>
+                </div>
+                <div class="window-content terminal-body-term blur-glass" id="jobs-output" style="font-size: 0.9em; overflow-y: hidden;">
+                    <!-- JS injects ASCII progress bars here -->
+                </div>
+            </div>
+
+            <!-- Bottom Right: Main System Log -->
+            <div class="window log-window" style="flex: 2;">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/logs</span> <span class="cmd">❯</span> tail -f system.log</span>
+                </div>
+                <div class="window-content terminal-body-term blur-glass" id="terminal-output" style="font-size: 0.9em;">
+                    <!-- Logs injected via JS -->
+                </div>
+            </div>
+
         </div>
 
     </main>

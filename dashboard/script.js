@@ -82,69 +82,190 @@ const throughputConfig = {
 new Chart(ctxThroughput, throughputConfig);
 
 
-// 2. Terminal Log Animation
+// 1b. API Key Doughnut Chart
+const ctxApi = document.getElementById('apiChart');
+let apiChartInstance = null;
+if (ctxApi) {
+    const apiData = {
+        labels: ['ACTIVE', 'COOLING', 'EXHAUSTED'],
+        datasets: [{
+            data: [60, 30, 10],
+            backgroundColor: [
+                termGreenBright, // Active
+                '#d3869b',       // Cooling (purple/pinkish)
+                '#fb4934'        // Exhausted (red/orange)
+            ],
+            borderColor: bgWindow,
+            borderWidth: 2,
+            hoverOffset: 4
+        }]
+    };
+
+    apiChartInstance = new Chart(ctxApi.getContext('2d'), {
+        type: 'doughnut',
+        data: apiData,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '75%', // Make it thin
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: bgWindow,
+                    titleColor: termGreenBright,
+                    bodyColor: '#a0a0a0',
+                    borderColor: termGreen,
+                    borderWidth: 1,
+                    cornerRadius: 0,
+                    bodyFont: { family: "'JetBrains Mono', monospace", size: 12 },
+                }
+            }
+        }
+    });
+}
+
+// ==========================================
+// CORE ASOST FRONTEND API (FOR REAL DATA)
+// ==========================================
+
+// 2. Terminal Log Output
 const terminalBody = document.getElementById('terminal-output');
-
-const initLogs = [
-    { type: 'sys', msg: 'archlinux x86_64 loaded.' },
-    { type: 'sys', msg: 'asost-daemon v2.4.1 starting...' },
-    { type: 'info', msg: 'connecting to main sqlite db [OK]' },
-    { type: 'info', msg: 'worker pool initialized (4 threads)' },
-    { type: 'warn', msg: 'tpm limit near for key: AIzaSyCq9' },
-    { type: 'info', msg: 'listening on port 8080' },
-];
-
-let logIndex = 0;
 
 function getTimestamp() {
     const now = new Date();
     return `[${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}]`;
 }
 
-function renderLog(log) {
+/**
+ * Adds a log to the terminal window.
+ * @param {string} msg - The log message (can include HTML for syntax highlighting).
+ * @param {string} type - 'info', 'sys', 'warn', 'err'
+ */
+function asostAddLog(msg, type = 'info') {
+    if (!terminalBody) return;
     const logEl = document.createElement('div');
 
     let colorClass = 'log-info';
     let prefix = '';
 
-    if (log.type === 'sys')  { colorClass = 'log-sys'; }
-    if (log.type === 'warn') { colorClass = 'log-warn'; prefix = 'WARN: '; }
-    if (log.type === 'err')  { colorClass = 'log-err'; prefix = 'ERR: '; }
+    if (type === 'sys')  { colorClass = 'log-sys'; }
+    if (type === 'warn') { colorClass = 'log-warn'; prefix = 'WARN: '; }
+    if (type === 'err')  { colorClass = 'log-err'; prefix = 'ERR: '; }
 
-    logEl.innerHTML = `<span class="log-time">${getTimestamp()}</span> <span class="${colorClass}">${prefix}${log.msg}</span>`;
+    logEl.innerHTML = `<span class="log-time">${getTimestamp()}</span> <span class="${colorClass}">${prefix}${msg}</span>`;
     terminalBody.appendChild(logEl);
 
+    // Auto-scroll to bottom
     terminalBody.scrollTop = terminalBody.scrollHeight;
 }
 
-// Initial burst of logs
-initLogs.forEach(log => {
-    setTimeout(() => renderLog(log), Math.random() * 1000);
-});
+// 3. Live ASCII Progress Bars (htop style)
+const jobsBody = document.getElementById('jobs-output');
+const activeJobs = new Map();
 
-// Continuous dummy logs with "Syntax Highlighting"
-function appendContinuousLog() {
-    const operations = ['extract_pdf', 'chunk_text', 'gemini_req', 'save_db'];
-    const files = ['Neuro_Ch1.pdf', 'Quantum.docx', 'BladeRunner.pdf'];
-    const op = operations[Math.floor(Math.random() * operations.length)];
-    const file = files[Math.floor(Math.random() * files.length)];
+/**
+ * Updates or creates an ASCII progress bar for a task.
+ * @param {string} taskId - Unique identifier for the file/task.
+ * @param {string} filename - The name of the file being processed.
+ * @param {number} percentage - Integer 0-100.
+ */
+function asostUpdateJobProgress(taskId, filename, percentage) {
+    if (!jobsBody) return;
 
-    const isWarn = Math.random() > 0.9;
-    const statusText = isWarn ? 'DELAY' : 'OK';
-    const statusClass = isWarn ? 'number' : 'log-sys'; // Using orange for warn, green for ok
+    const barWidth = 20;
+    const filledCount = Math.floor((percentage / 100) * barWidth);
+    const emptyCount = barWidth - filledCount;
 
-    const formattedMsg = `<span class="keyword">${op}</span> <span class="punct">-></span> <span class="string">"${file}"</span> <span class="punct">[</span><span class="${statusClass}">${statusText}</span><span class="punct">]</span>`;
+    // Using blocks: █ and ░
+    const filledBar = '<span class="string">' + '█'.repeat(filledCount) + '</span>';
+    const emptyBar = '<span class="comment">' + '░'.repeat(emptyCount) + '</span>';
 
-    renderLog({
-        type: isWarn ? 'warn' : 'info',
-        msg: formattedMsg
-    });
+    const percentStr = percentage.toString().padStart(3, ' ') + '%';
 
-    const nextTimeout = Math.random() * 4000 + 1000;
-    setTimeout(appendContinuousLog, nextTimeout);
+    let jobEl = activeJobs.get(taskId);
+    if (!jobEl) {
+        jobEl = document.createElement('div');
+        jobEl.className = 'job-row';
+        jobsBody.appendChild(jobEl);
+        activeJobs.set(taskId, jobEl);
+    }
+
+    // Format: 1 [████████░░] 45% filename.pdf
+    jobEl.innerHTML = `<span class="keyword">${taskId.padStart(3, '0')}</span> <span class="punct">[</span>${filledBar}${emptyBar}<span class="punct">]</span> <span class="number">${percentStr}</span> <span class="log-info">${filename}</span>`;
+
+    // Remove if 100% after a short delay
+    if (percentage >= 100) {
+        setTimeout(() => {
+            if (activeJobs.has(taskId)) {
+                activeJobs.get(taskId).remove();
+                activeJobs.delete(taskId);
+                asostAddLog(`<span class="keyword">finished</span> <span class="punct">-></span> <span class="string">"${filename}"</span>`, 'sys');
+            }
+        }, 3000);
+    }
 }
 
-setTimeout(appendContinuousLog, 2500);
+// ==========================================
+// DUMMY DATA INJECTION (FOR MOCKUP DEMO)
+// ==========================================
+
+// Initial burst of logs
+setTimeout(() => asostAddLog('asost-daemon v2.4.1 starting...', 'sys'), 500);
+setTimeout(() => asostAddLog('connecting to main sqlite db [OK]', 'info'), 1000);
+setTimeout(() => asostAddLog('worker pool initialized (12 threads)', 'info'), 1500);
+setTimeout(() => asostAddLog('tpm limit near for key: AIzaSyCq9', 'warn'), 2000);
+setTimeout(() => asostAddLog('listening on port 8080', 'sys'), 2500);
+
+// Simulate continuous background tasks
+function simulateBackend() {
+    // 1. Logs
+    if (Math.random() > 0.5) {
+        const operations = ['extract_pdf', 'chunk_text', 'gemini_req', 'save_db'];
+        const files = ['Neuro_Ch1.pdf', 'Quantum.docx', 'BladeRunner.pdf'];
+        const op = operations[Math.floor(Math.random() * operations.length)];
+        const file = files[Math.floor(Math.random() * files.length)];
+
+        const isWarn = Math.random() > 0.9;
+        const statusText = isWarn ? 'DELAY' : 'OK';
+        const statusClass = isWarn ? 'number' : 'log-sys';
+        const formattedMsg = `<span class="keyword">${op}</span> <span class="punct">-></span> <span class="string">"${file}"</span> <span class="punct">[</span><span class="${statusClass}">${statusText}</span><span class="punct">]</span>`;
+
+        asostAddLog(formattedMsg, isWarn ? 'warn' : 'info');
+    }
+
+    // 2. Live Progress
+    ['001', '002', '003'].forEach(id => {
+        // Randomly update progress
+        if (Math.random() > 0.3) {
+            let currentP = parseInt(document.querySelector(`[data-task="${id}"]`)?.dataset?.p || "0");
+            if (currentP === 0) {
+                 // Start new
+                 currentP = Math.floor(Math.random() * 20);
+            } else {
+                 // Increment
+                 currentP += Math.floor(Math.random() * 5);
+                 if (currentP > 100) currentP = 100;
+            }
+
+            // Store state hackily for dummy demo
+            let names = {'001': 'Quantum_Physics.pdf', '002': 'AI_Research.docx', '003': 'Data_Structures.pdf'};
+            asostUpdateJobProgress(id, names[id], currentP);
+
+            // Hack to store percentage on the element for next iteration
+            const el = activeJobs.get(id);
+            if (el) {
+                el.dataset.p = currentP;
+                el.dataset.task = id;
+            }
+        }
+    });
+
+    const nextTimeout = Math.random() * 2000 + 500;
+    setTimeout(simulateBackend, nextTimeout);
+}
+
+setTimeout(simulateBackend, 3000);
+
 
 
 // 3. ASCII Upload Zone Interactivity
@@ -197,8 +318,8 @@ function handleFileTermMock(fileName) {
         <p class="center-text string">"${fileName}"</p>
     `;
 
-    // Log
-    renderLog({ type: 'sys', msg: `<span class="keyword">received_upload</span> <span class="punct">:</span> <span class="string">"${fileName}"</span>` });
+    // Log using new API
+    asostAddLog(`<span class="keyword">received_upload</span> <span class="punct">:</span> <span class="string">"${fileName}"</span>`, 'sys');
 
     // Reset
     setTimeout(() => {
