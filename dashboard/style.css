@@ -21,9 +21,20 @@
     --border-color: rgba(70, 102, 0, 0.3);
     --border-active: var(--term-green-bright);
 
-    --font-mono: 'JetBrains Mono', monospace;
+    --font-mono: 'ThedusCondensedLight-Regular', monospace;
+    --font-header: 'ThedusWideLight-Bold', monospace;
 
     --gap: 12px;
+}
+
+@font-face {
+    font-family: 'ThedusCondensedLight-Regular';
+    src: url('font/Thedus DCU/Thedus DCU/ThedusCondensedLight-Regular.otf') format('opentype');
+}
+
+@font-face {
+    font-family: 'ThedusWideLight-Bold';
+    src: url('font/Thedus DCU/Thedus DCU/ThedusWideLight-Bold.otf') format('opentype');
 }
 
 * {
@@ -132,7 +143,8 @@ body {
     backdrop-filter: blur(5px);
     border-bottom: 1px solid var(--border-active);
     padding: 4px 16px;
-    font-size: 12px;
+    font-size: 14px;
+    font-family: var(--font-header);
     color: var(--text-muted);
     z-index: 10;
 }
@@ -236,7 +248,8 @@ body {
 .window-bar {
     background-color: rgba(20, 20, 20, 0.85);
     padding: 4px 12px;
-    font-size: 11px;
+    font-size: 12px;
+    font-family: var(--font-header);
     color: var(--text-primary);
     border-bottom: 1px solid var(--border-color);
     display: flex;
@@ -355,6 +368,7 @@ body {
 .terminal-body-term {
     padding: 12px;
     line-height: 1.6;
+    font-family: var(--font-header);
 }
 
 .terminal-body-term .log-time { color: var(--text-muted); margin-right: 12px; }
