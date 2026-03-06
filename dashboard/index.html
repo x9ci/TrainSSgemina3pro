@@ -4,162 +4,170 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ASOSTproject - Control Panel</title>
-    <!-- Fonts -->
+    <!-- Fonts: JetBrains Mono (Tech), Cairo (UI/Arabic Support) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&family=JetBrains+Mono:wght@100;300;400;700&display=swap" rel="stylesheet">
+    <!-- Chart.js for beautiful, responsive charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Background Animation Canvas -->
-    <canvas id="bg-canvas"></canvas>
 
-    <!-- Grid Overlay -->
-    <div class="grid-overlay"></div>
+    <!-- Animated Deep Gradient Background -->
+    <div class="ambient-background"></div>
 
-    <div class="app-container">
-        <!-- Sidebar Navigation -->
-        <aside class="sidebar">
+    <div class="app-wrapper">
+        <!-- Floating Sidebar (Apple-like Dock / Pill) -->
+        <aside class="sidebar glass-bubble">
             <div class="brand">
-                <h1>ASOST<span class="highlight">_</span></h1>
-                <p class="subtitle">Translation System</p>
+                <div class="logo-circle">
+                    <span>A</span>
+                </div>
             </div>
 
             <nav class="nav-menu">
-                <a href="#" class="nav-item active">
-                    <span class="icon">[+]</span> Dashboard
+                <a href="#" class="nav-item active" title="Dashboard">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
                 </a>
-                <a href="#" class="nav-item">
-                    <span class="icon">[^]</span> Upload Book
+                <a href="#" class="nav-item" title="Upload Book">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
                 </a>
-                <a href="#" class="nav-item">
-                    <span class="icon">[=]</span> Translation Queue
+                <a href="#" class="nav-item" title="Translation Queue">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
                 </a>
-                <a href="#" class="nav-item">
-                    <span class="icon">[>]</span> Processing
+                <a href="#" class="nav-item" title="Processing">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                 </a>
-                <a href="#" class="nav-item">
-                    <span class="icon">[v]</span> Downloads
-                </a>
-                <a href="#" class="nav-item">
-                    <span class="icon">[*]</span> Settings
+                <a href="#" class="nav-item" title="Downloads">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                 </a>
             </nav>
 
-            <div class="system-status">
-                <p>Status: <span class="status-indicator online"></span> <span class="highlight">ONLINE</span></p>
-                <p>Nodes: 4/4 Active</p>
+            <div class="nav-bottom">
+                <a href="#" class="nav-item" title="Settings">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                </a>
             </div>
         </aside>
 
-        <!-- Main Content Area -->
+        <!-- Main Dashboard Area -->
         <main class="main-content">
-            <header class="top-bar">
-                <h2>Overview Dashboard</h2>
-                <div class="user-info">
-                    <span>Admin_Root</span>
+
+            <!-- Header Section -->
+            <header class="dashboard-header">
+                <div class="greeting">
+                    <h1 class="gradient-text">Overview</h1>
+                    <p>System is running smoothly. 4 nodes active.</p>
+                </div>
+                <div class="user-profile glass-bubble">
+                    <div class="status-dot"></div>
+                    <span>Root_Admin</span>
                 </div>
             </header>
 
-            <div class="dashboard-grid">
+            <!-- Organic Flow Layout -->
+            <div class="content-flow">
 
-                <!-- Statistics Panel -->
-                <div class="panel stats-panel glass">
-                    <h3 class="panel-title">System Stats</h3>
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <span class="stat-value">1,204</span>
-                            <span class="stat-label">Books Translated</span>
+                <!-- Quick Stats (Pills) -->
+                <div class="stats-row">
+                    <div class="stat-pill glass-bubble">
+                        <div class="stat-icon">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
                         </div>
-                        <div class="stat-card">
-                            <span class="stat-value">452K</span>
-                            <span class="stat-label">Pages Processed</span>
+                        <div class="stat-info">
+                            <span class="value">1,204</span>
+                            <span class="label">Books Done</span>
                         </div>
-                        <div class="stat-card">
-                            <span class="stat-value">12</span>
-                            <span class="stat-label">Active Tasks</span>
+                    </div>
+
+                    <div class="stat-pill glass-bubble">
+                        <div class="stat-icon">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
                         </div>
-                        <div class="stat-card">
-                            <span class="stat-value">99.8%</span>
-                            <span class="stat-label">API Health</span>
+                        <div class="stat-info">
+                            <span class="value">452K</span>
+                            <span class="label">Pages Proc.</span>
+                        </div>
+                    </div>
+
+                    <div class="stat-pill glass-bubble highlight-pill">
+                        <div class="stat-icon">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                        </div>
+                        <div class="stat-info">
+                            <span class="value">12</span>
+                            <span class="label">Active Jobs</span>
                         </div>
                     </div>
                 </div>
 
-                <!-- File Upload Area -->
-                <div class="panel upload-panel glass">
-                    <h3 class="panel-title">Upload Target</h3>
-                    <div class="upload-zone" id="drop-zone">
-                        <div class="upload-icon">[_]</div>
-                        <p>Drag & Drop PDF/DOCX here</p>
-                        <span class="sub-text">or click to browse</span>
-                        <input type="file" id="file-input" hidden>
+                <!-- Main Middle Section -->
+                <div class="middle-section">
+
+                    <!-- Performance Chart (Large Area) -->
+                    <div class="chart-container glass-bubble">
+                        <div class="section-header">
+                            <h2>Translation Throughput</h2>
+                            <select class="time-filter">
+                                <option>Last 7 Days</option>
+                                <option>Last 30 Days</option>
+                            </select>
+                        </div>
+                        <div class="chart-wrapper">
+                            <canvas id="throughputChart"></canvas>
+                        </div>
                     </div>
+
+                    <!-- Upload Zone (Sleek Apple-like drop area) -->
+                    <div class="upload-container glass-bubble" id="drop-zone">
+                        <div class="upload-content">
+                            <div class="upload-icon-large">
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                            </div>
+                            <h3>Upload Document</h3>
+                            <p>Drag PDF or DOCX here</p>
+                            <button class="btn-primary" onclick="document.getElementById('file-input').click()">Browse Files</button>
+                            <input type="file" id="file-input" hidden>
+                        </div>
+                    </div>
+
                 </div>
 
-                <!-- Processing Status Cards -->
-                <div class="panel processing-panel glass">
-                    <h3 class="panel-title">Active Processing</h3>
-                    <div class="task-list">
+                <!-- Bottom Section -->
+                <div class="bottom-section">
 
-                        <div class="task-card">
-                            <div class="task-header">
-                                <span>The_Quantum_Enigma.pdf</span>
-                                <span class="task-status">Translating...</span>
-                            </div>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar" style="width: 76%;"></div>
-                            </div>
-                            <div class="task-details">
-                                <span>Ch 4: Entanglement</span>
-                                <span>76%</span>
+                    <!-- API Health & Processing Details -->
+                    <div class="api-health-container glass-bubble">
+                        <div class="section-header">
+                            <h2>API Key Distribution</h2>
+                        </div>
+                        <div class="doughnut-wrapper">
+                            <canvas id="apiHealthChart"></canvas>
+                            <div class="center-metric">
+                                <span class="percent">99%</span>
+                                <span class="desc">Healthy</span>
                             </div>
                         </div>
-
-                        <div class="task-card">
-                            <div class="task-header">
-                                <span>Neuromancer_Ar.docx</span>
-                                <span class="task-status">Formatting...</span>
-                            </div>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar" style="width: 92%;"></div>
-                            </div>
-                            <div class="task-details">
-                                <span>Generating TOC</span>
-                                <span>92%</span>
-                            </div>
-                        </div>
-
-                        <div class="task-card">
-                            <div class="task-header">
-                                <span>Dune_Chronicles.pdf</span>
-                                <span class="task-status pending">Queued</span>
-                            </div>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar pending" style="width: 0%;"></div>
-                            </div>
-                            <div class="task-details">
-                                <span>Waiting for API Key</span>
-                                <span>0%</span>
-                            </div>
-                        </div>
-
-                    </div>
-                </div>
-
-                <!-- Terminal Activity Logs -->
-                <div class="panel terminal-panel glass">
-                    <div class="terminal-header">
-                        <span class="terminal-title">~/ASOST/logs/sys.log</span>
-                        <div class="terminal-controls">
-                            <span class="dot"></span>
-                            <span class="dot"></span>
-                            <span class="dot"></span>
+                        <div class="api-legend">
+                            <div class="legend-item"><span class="dot active"></span> Active (8)</div>
+                            <div class="legend-item"><span class="dot cooled"></span> Cooldown (2)</div>
                         </div>
                     </div>
-                    <div class="terminal-body" id="terminal-output">
-                        <!-- Logs will be injected here via JS -->
+
+                    <!-- Sleek Activity Terminal -->
+                    <div class="terminal-container glass-bubble">
+                        <div class="terminal-header">
+                            <div class="mac-dots">
+                                <span></span><span></span><span></span>
+                            </div>
+                            <span class="term-title">system.log — ASOST</span>
+                        </div>
+                        <div class="terminal-body" id="terminal-output">
+                            <!-- Logs injected via JS -->
+                        </div>
                     </div>
+
                 </div>
 
             </div>

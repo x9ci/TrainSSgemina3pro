@@ -1,87 +1,127 @@
-// Background Animation - Subtle Matrix/Pixel clouds effect
-const canvas = document.getElementById('bg-canvas');
-const ctx = canvas.getContext('2d');
+// Global Chart Settings to match the Cyberpunk / Glassmorphism theme
+Chart.defaults.color = '#8abf8a';
+Chart.defaults.font.family = "'JetBrains Mono', monospace";
 
-let width, height;
-let particles = [];
+// 1. Throughput Line Chart (Smooth Curve)
+const ctxThroughput = document.getElementById('throughputChart').getContext('2d');
 
-function resize() {
-    width = canvas.width = window.innerWidth;
-    height = canvas.height = window.innerHeight;
-}
-window.addEventListener('resize', resize);
-resize();
+// Create Gradient for Line Fill
+const gradientFill = ctxThroughput.createLinearGradient(0, 0, 0, 300);
+gradientFill.addColorStop(0, 'rgba(0, 255, 65, 0.4)');
+gradientFill.addColorStop(1, 'rgba(0, 255, 65, 0.0)');
 
-// Subtle characters for the background texture
-const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*()";
-const charArray = chars.split("");
+const throughputData = {
+    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    datasets: [{
+        label: 'Pages Translated',
+        data: [1200, 1900, 1500, 2200, 1800, 2500, 3100],
+        borderColor: '#00ff41',
+        backgroundColor: gradientFill,
+        borderWidth: 2,
+        pointBackgroundColor: '#0a0e0a',
+        pointBorderColor: '#00ff41',
+        pointBorderWidth: 2,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        fill: true,
+        tension: 0.4 // Smooth curve (Apple-like)
+    }]
+};
 
-class Particle {
-    constructor() {
-        this.reset();
+const throughputConfig = {
+    type: 'line',
+    data: throughputData,
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                backgroundColor: 'rgba(10, 20, 10, 0.8)',
+                titleColor: '#00ff41',
+                bodyColor: '#e6ffe6',
+                borderColor: 'rgba(0, 255, 65, 0.2)',
+                borderWidth: 1,
+                padding: 10,
+                displayColors: false,
+                callbacks: {
+                    label: function(context) {
+                        return context.parsed.y + ' Pages';
+                    }
+                }
+            }
+        },
+        scales: {
+            y: {
+                beginAtZero: true,
+                grid: {
+                    color: 'rgba(0, 255, 65, 0.05)',
+                    drawBorder: false,
+                },
+                ticks: { padding: 10 }
+            },
+            x: {
+                grid: { display: false, drawBorder: false },
+                ticks: { padding: 10 }
+            }
+        },
+        interaction: { intersect: false, mode: 'index' },
     }
+};
 
-    reset() {
-        this.x = Math.random() * width;
-        this.y = Math.random() * height;
-        this.size = Math.random() * 8 + 4; // Font size roughly
-        this.speedX = (Math.random() - 0.5) * 0.2;
-        this.speedY = Math.random() * -0.5 - 0.1; // Float slowly upwards
-        this.opacity = Math.random() * 0.15; // Very subtle
-        this.char = charArray[Math.floor(Math.random() * charArray.length)];
-        this.life = Math.random() * 100 + 50;
-    }
+new Chart(ctxThroughput, throughputConfig);
 
-    update() {
-        this.x += this.speedX;
-        this.y += this.speedY;
-        this.life -= 0.5;
 
-        if (this.y < 0 || this.life <= 0) {
-            this.reset();
-            this.y = height + Math.random() * 50;
+// 2. API Health Doughnut Chart
+const ctxApiHealth = document.getElementById('apiHealthChart').getContext('2d');
+
+const apiHealthData = {
+    labels: ['Active', 'Cooldown'],
+    datasets: [{
+        data: [8, 2], // 8 active keys, 2 on cooldown
+        backgroundColor: [
+            '#00ff41',
+            'rgba(0, 255, 65, 0.1)'
+        ],
+        borderColor: '#0a0e0a', // Matches background
+        borderWidth: 2,
+        hoverOffset: 4
+    }]
+};
+
+const apiHealthConfig = {
+    type: 'doughnut',
+    data: apiHealthData,
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '80%', // Thin elegant ring
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                backgroundColor: 'rgba(10, 20, 10, 0.8)',
+                bodyColor: '#e6ffe6',
+                borderColor: 'rgba(0, 255, 65, 0.2)',
+                borderWidth: 1,
+                padding: 10,
+                displayColors: true
+            }
         }
     }
+};
 
-    draw() {
-        ctx.fillStyle = `rgba(0, 255, 65, ${this.opacity})`;
-        ctx.font = `${this.size}px monospace`;
-        ctx.fillText(this.char, this.x, this.y);
-    }
-}
+new Chart(ctxApiHealth, apiHealthConfig);
 
-// Create particles
-const numParticles = 150; // Keep it light
-for (let i = 0; i < numParticles; i++) {
-    particles.push(new Particle());
-}
 
-function animate() {
-    ctx.clearRect(0, 0, width, height);
-
-    for (let particle of particles) {
-        particle.update();
-        particle.draw();
-    }
-
-    requestAnimationFrame(animate);
-}
-
-// Start background animation
-animate();
-
-// --- Dummy Terminal Logic ---
+// --- Interactive Terminal Simulation ---
 const terminalBody = document.getElementById('terminal-output');
 
 const logs = [
-    { type: 'info', msg: 'System initialized. All modules loaded.' },
-    { type: 'info', msg: 'Connecting to main database... OK' },
-    { type: 'info', msg: 'API Gateway ready. Rate limiters online.' },
-    { type: 'info', msg: 'Started job processing queue listener.' },
-    { type: 'warn', msg: 'High load detected on worker node 03.' },
-    { type: 'info', msg: 'Re-routing translation request ASOST-9021.' },
-    { type: 'info', msg: 'PDF text extraction completed for [The_Quantum_Enigma.pdf]' },
-    { type: 'info', msg: 'Translating chapter 4: Entanglement...' },
+    { type: 'info', msg: 'System initialized. All core modules active.' },
+    { type: 'info', msg: 'DB connection established. Latency: 4ms' },
+    { type: 'warn', msg: 'Key [AIzaSyCq9...] approaching TPM limit.' },
+    { type: 'info', msg: 'Started dynamic chunking for [Neuro_Ch1.pdf]' },
+    { type: 'info', msg: 'Translation engine: Gemini-2.5-Pro loaded.' },
 ];
 
 let logIndex = 0;
@@ -93,10 +133,15 @@ function getTimestamp() {
 
 function appendLog() {
     if (logIndex >= logs.length) {
-        // Reset or add random logs just to keep it looking active
+        // Generate continuous random dummy logs to keep the UI feeling alive
+        const operations = ['Extracting', 'Translating', 'Formatting', 'Verifying'];
+        const files = ['Ch3_Matrix.pdf', 'Ghost_Shell_Doc.docx', 'Blade_Runner.pdf'];
+        const op = operations[Math.floor(Math.random() * operations.length)];
+        const file = files[Math.floor(Math.random() * files.length)];
+
         logs.push({
-            type: Math.random() > 0.8 ? 'warn' : 'info',
-            msg: `Processing background task hash: ${Math.random().toString(36).substring(7).toUpperCase()}...`
+            type: Math.random() > 0.85 ? 'warn' : 'info',
+            msg: `${op} ${file}... OK`
         });
     }
 
@@ -104,97 +149,92 @@ function appendLog() {
     const logEl = document.createElement('div');
 
     let colorClass = 'log-info';
-    let prefix = '[INFO]';
+    let prefix = '[SYS]';
 
-    if (log.type === 'warn') { colorClass = 'log-warn'; prefix = '[WARN]'; }
-    if (log.type === 'error') { colorClass = 'log-error'; prefix = '[ERR] ';}
+    if (log.type === 'warn') { colorClass = 'log-warn'; prefix = '[WRN]'; }
+    if (log.type === 'error') { colorClass = 'log-error'; prefix = '[ERR]'; }
 
     logEl.innerHTML = `<span class="log-time">${getTimestamp()}</span> <span class="${colorClass}">${prefix} ${log.msg}</span>`;
 
     terminalBody.appendChild(logEl);
 
-    // Scroll to bottom
-    terminalBody.scrollTop = terminalBody.scrollHeight;
+    // Auto scroll to bottom smoothly
+    terminalBody.scrollTo({
+        top: terminalBody.scrollHeight,
+        behavior: 'smooth'
+    });
 
     logIndex++;
 
-    // Trigger next log randomly between 1 to 4 seconds
-    const nextTimeout = Math.random() * 3000 + 1000;
+    // Trigger next log randomly between 2s and 5s
+    const nextTimeout = Math.random() * 3000 + 2000;
     setTimeout(appendLog, nextTimeout);
 }
 
-// Start terminal logs
-setTimeout(appendLog, 1000);
+// Start terminal logs after a slight delay
+setTimeout(appendLog, 1500);
 
-// --- Simple File Upload UI logic (Mock) ---
+// --- Sleek Upload Zone Interactivity ---
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 
-dropZone.addEventListener('click', () => {
-    fileInput.click();
-});
-
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
-    dropZone.style.backgroundColor = 'rgba(0, 255, 65, 0.1)';
+    dropZone.style.transform = 'scale(1.02)';
+    dropZone.style.borderColor = '#00ff41';
+    dropZone.style.boxShadow = '0 0 20px rgba(0, 255, 65, 0.2)';
 });
 
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
-    dropZone.style.backgroundColor = '';
+    dropZone.style.transform = 'scale(1)';
+    dropZone.style.borderColor = 'rgba(0, 255, 65, 0.15)';
+    dropZone.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4)';
 });
 
 dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
-    dropZone.style.backgroundColor = '';
+    dropZone.style.transform = 'scale(1)';
+    dropZone.style.borderColor = 'rgba(0, 255, 65, 0.15)';
+    dropZone.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4)';
 
     if (e.dataTransfer.files.length) {
-        handleFile(e.dataTransfer.files[0]);
+        handleFileMock(e.dataTransfer.files[0]);
     }
 });
 
 fileInput.addEventListener('change', (e) => {
     if (e.target.files.length) {
-        handleFile(e.target.files[0]);
+        handleFileMock(e.target.files[0]);
     }
 });
 
-function handleFile(file) {
+function handleFileMock(file) {
     const fileName = file.name;
-    const terminalOutput = document.getElementById('terminal-output');
+    const content = dropZone.querySelector('.upload-content');
 
-    // Add to terminal visually
-    logs.push({ type: 'info', msg: `Received upload: ${fileName}` });
-    logs.push({ type: 'info', msg: `Adding ${fileName} to queue...` });
+    // Add upload event to terminal
+    logs.push({ type: 'info', msg: `Upload initiated: ${fileName}` });
 
-    // Visual feedback in dropzone
-    dropZone.innerHTML = `
-        <div class="upload-icon" style="color: white">[+]</div>
-        <p style="color: white">File Queued</p>
-        <span class="sub-text" style="color: var(--neon-green)">${fileName}</span>
+    // Visual feedback
+    content.innerHTML = `
+        <div class="upload-icon-large" style="color: #fff">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </div>
+        <h3 style="color: #00ff41">File Accepted</h3>
+        <p style="color: #fff; font-family: var(--font-tech); font-size: 0.8rem;">${fileName}</p>
     `;
 
+    // Reset after 3 seconds
     setTimeout(() => {
-        // Reset dropzone after a bit
-        dropZone.innerHTML = `
-            <div class="upload-icon">[_]</div>
-            <p>Drag & Drop PDF/DOCX here</p>
-            <span class="sub-text">or click to browse</span>
+        content.innerHTML = `
+            <div class="upload-icon-large">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            </div>
+            <h3>Upload Document</h3>
+            <p>Drag PDF or DOCX here</p>
+            <button class="btn-primary" onclick="document.getElementById('file-input').click()">Browse Files</button>
             <input type="file" id="file-input" hidden>
         `;
-    }, 4000);
+    }, 3000);
 }
-
-// Mock active navigation state changes
-const navItems = document.querySelectorAll('.nav-item');
-navItems.forEach(item => {
-    item.addEventListener('click', (e) => {
-        e.preventDefault();
-        navItems.forEach(nav => nav.classList.remove('active'));
-        item.classList.add('active');
-
-        // Push click log to terminal
-        const pageName = item.textContent.trim().replace(/\[.*?\]\s*/, '');
-        logs.push({ type: 'info', msg: `User navigated to: ${pageName}` });
-    });
-});
