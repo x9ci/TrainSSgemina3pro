@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASOSTproject - Control Panel</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&family=JetBrains+Mono:wght@100;300;400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Background Animation Canvas -->
+    <canvas id="bg-canvas"></canvas>
+
+    <!-- Grid Overlay -->
+    <div class="grid-overlay"></div>
+
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <h1>ASOST<span class="highlight">_</span></h1>
+                <p class="subtitle">Translation System</p>
+            </div>
+
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active">
+                    <span class="icon">[+]</span> Dashboard
+                </a>
+                <a href="#" class="nav-item">
+                    <span class="icon">[^]</span> Upload Book
+                </a>
+                <a href="#" class="nav-item">
+                    <span class="icon">[=]</span> Translation Queue
+                </a>
+                <a href="#" class="nav-item">
+                    <span class="icon">[>]</span> Processing
+                </a>
+                <a href="#" class="nav-item">
+                    <span class="icon">[v]</span> Downloads
+                </a>
+                <a href="#" class="nav-item">
+                    <span class="icon">[*]</span> Settings
+                </a>
+            </nav>
+
+            <div class="system-status">
+                <p>Status: <span class="status-indicator online"></span> <span class="highlight">ONLINE</span></p>
+                <p>Nodes: 4/4 Active</p>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-bar">
+                <h2>Overview Dashboard</h2>
+                <div class="user-info">
+                    <span>Admin_Root</span>
+                </div>
+            </header>
+
+            <div class="dashboard-grid">
+
+                <!-- Statistics Panel -->
+                <div class="panel stats-panel glass">
+                    <h3 class="panel-title">System Stats</h3>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <span class="stat-value">1,204</span>
+                            <span class="stat-label">Books Translated</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-value">452K</span>
+                            <span class="stat-label">Pages Processed</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-value">12</span>
+                            <span class="stat-label">Active Tasks</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-value">99.8%</span>
+                            <span class="stat-label">API Health</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- File Upload Area -->
+                <div class="panel upload-panel glass">
+                    <h3 class="panel-title">Upload Target</h3>
+                    <div class="upload-zone" id="drop-zone">
+                        <div class="upload-icon">[_]</div>
+                        <p>Drag & Drop PDF/DOCX here</p>
+                        <span class="sub-text">or click to browse</span>
+                        <input type="file" id="file-input" hidden>
+                    </div>
+                </div>
+
+                <!-- Processing Status Cards -->
+                <div class="panel processing-panel glass">
+                    <h3 class="panel-title">Active Processing</h3>
+                    <div class="task-list">
+
+                        <div class="task-card">
+                            <div class="task-header">
+                                <span>The_Quantum_Enigma.pdf</span>
+                                <span class="task-status">Translating...</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" style="width: 76%;"></div>
+                            </div>
+                            <div class="task-details">
+                                <span>Ch 4: Entanglement</span>
+                                <span>76%</span>
+                            </div>
+                        </div>
+
+                        <div class="task-card">
+                            <div class="task-header">
+                                <span>Neuromancer_Ar.docx</span>
+                                <span class="task-status">Formatting...</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" style="width: 92%;"></div>
+                            </div>
+                            <div class="task-details">
+                                <span>Generating TOC</span>
+                                <span>92%</span>
+                            </div>
+                        </div>
+
+                        <div class="task-card">
+                            <div class="task-header">
+                                <span>Dune_Chronicles.pdf</span>
+                                <span class="task-status pending">Queued</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar pending" style="width: 0%;"></div>
+                            </div>
+                            <div class="task-details">
+                                <span>Waiting for API Key</span>
+                                <span>0%</span>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Terminal Activity Logs -->
+                <div class="panel terminal-panel glass">
+                    <div class="terminal-header">
+                        <span class="terminal-title">~/ASOST/logs/sys.log</span>
+                        <div class="terminal-controls">
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                        </div>
+                    </div>
+                    <div class="terminal-body" id="terminal-output">
+                        <!-- Logs will be injected here via JS -->
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
