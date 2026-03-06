@@ -73,6 +73,50 @@ body {
     text-shadow: 0 0 5px var(--term-green-bright);
 }
 
+/* Cyberpunk Glitch Animation for Logo */
+.cyberpunk-glitch {
+    position: relative;
+    animation: glitch-anim 5s infinite;
+}
+
+@keyframes glitch-anim {
+    0%, 92% {
+        transform: translate(0, 0);
+        text-shadow: 0 0 5px var(--term-green-bright);
+        opacity: 1;
+    }
+    93% {
+        transform: translate(-2px, 1px);
+        text-shadow: -2px 0 var(--term-red), 2px 0 var(--term-blue);
+        opacity: 0.8;
+    }
+    94% {
+        transform: translate(2px, -1px);
+        text-shadow: 2px 0 var(--term-red), -2px 0 var(--term-blue);
+        opacity: 0.9;
+    }
+    95% {
+        transform: translate(0, 0);
+        text-shadow: 0 0 5px var(--term-green-bright);
+        opacity: 1;
+    }
+    98% {
+        transform: translate(1px, 2px);
+        text-shadow: 2px 0 var(--term-green-bright);
+        opacity: 0.8;
+    }
+    99% {
+        transform: translate(-1px, -2px);
+        text-shadow: -2px 0 var(--term-green-bright);
+        opacity: 0.9;
+    }
+    100% {
+        transform: translate(0, 0);
+        text-shadow: 0 0 5px var(--term-green-bright);
+        opacity: 1;
+    }
+}
+
 /* Custom Scrollbar for Terminals */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg-window); }

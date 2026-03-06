@@ -58,12 +58,13 @@
                     <span class="window-controls"><i class="fa-solid fa-circle"></i> <i class="fa-solid fa-circle"></i></span>
                 </div>
                 <div class="window-content blur-glass">
-                    <div class="ascii-art glow-text">
-     ___   _____  ____  _____  _______
-    /   | / ___/ / __ \/ ___/ /__  __/
-   / /| | \__ \ / / / /\__ \    / /
-  / ___ |___/ // /_/ /___/ /   / /
- /_/  |_/____/ \____//____/   /_/
+                    <div class="ascii-art glow-text cyberpunk-glitch">
+ █████╗  ██████╗ ████████╗
+██╔══██╗██╔═══██╗╚══██╔══╝
+███████║╚██████╔╝   ██║
+██╔══██║ ██╔══██╗   ██║
+██║  ██║╚██████╔╝   ██║
+╚═╝  ╚═╝ ╚═════╝    ╚═╝
                     </div>
 
                     <!-- Technical Quote instead of fake OS data -->
@@ -105,20 +106,20 @@
         <!-- Center Column: Charts -->
         <div class="tile-col center-col">
 
-            <!-- Top Chart: Throughput -->
-            <div class="window" style="height: 250px;">
-                <div class="window-bar">
-                    <span class="prompt"><span class="path">~/throughput</span> <span class="cmd">❯</span> plot --last 7d</span>
-                </div>
-                <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px;">
-                    <canvas id="throughputChart"></canvas>
-                </div>
-            </div>
+            <!-- Top Row in Center: Line Chart & Doughnut Side-by-Side -->
+            <div class="tile-row" style="height: 250px;">
 
-            <!-- Bottom Row in Center -->
-            <div class="tile-row" style="height: 200px;">
+                <!-- Main Throughput Chart (Left side) -->
+                <div class="window" style="flex: 2;">
+                    <div class="window-bar">
+                        <span class="prompt"><span class="path">~/throughput</span> <span class="cmd">❯</span> plot --last 7d</span>
+                    </div>
+                    <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px;">
+                        <canvas id="throughputChart"></canvas>
+                    </div>
+                </div>
 
-                <!-- Win 3.5: API Doughnut -->
+                <!-- API Doughnut (Right side) -->
                 <div class="window" style="flex: 1;">
                     <div class="window-bar">
                         <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> ./health</span>
@@ -133,22 +134,23 @@
                     </div>
                 </div>
 
-                <!-- Win 3.6: Global Stats -->
-                <div class="window" style="flex: 1;">
-                    <div class="window-bar">
-                        <span class="prompt"><span class="path">~/stats</span> <span class="cmd">❯</span> cat db.json</span>
-                    </div>
-                    <div class="window-content blur-glass" style="padding: 16px;">
-                        <div class="stats-grid-term">
-                            <div class="stat-line"><span class="key keyword">books_translated:</span> <span class="val number">1204</span></div>
-                            <div class="stat-line"><span class="key keyword">pages_processed :</span> <span class="val number">452000</span></div>
-                            <div class="stat-line"><span class="key keyword">active_threads  :</span> <span class="val number">12</span></div>
-                            <div class="stat-line"><span class="key keyword">last_job_id     :</span> <span class="val string">"A-9021"</span></div>
-                        </div>
+            </div>
+
+            <!-- Bottom Window in Center: Global Stats -->
+            <div class="window" style="flex-grow: 1;">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/stats</span> <span class="cmd">❯</span> cat db.json</span>
+                </div>
+                <div class="window-content blur-glass" style="padding: 16px;">
+                    <div class="stats-grid-term" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div class="stat-line"><span class="key keyword">books_translated:</span> <span class="val number">1204</span></div>
+                        <div class="stat-line"><span class="key keyword">pages_processed :</span> <span class="val number">452000</span></div>
+                        <div class="stat-line"><span class="key keyword">active_threads  :</span> <span class="val number">12</span></div>
+                        <div class="stat-line"><span class="key keyword">last_job_id     :</span> <span class="val string">"A-9021"</span></div>
                     </div>
                 </div>
-
             </div>
+
         </div>
 
         <!-- Right Column: Logs & Jobs -->
