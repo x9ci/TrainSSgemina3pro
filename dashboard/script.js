@@ -1,28 +1,29 @@
 // Global Chart Settings to match the Cyberpunk / Glassmorphism theme
-Chart.defaults.color = '#8abf8a';
-Chart.defaults.font.family = "'JetBrains Mono', monospace";
+Chart.defaults.color = '#9ddb9d';
+Chart.defaults.font.family = "'Rajdhani', sans-serif";
+Chart.defaults.font.size = 14;
 
 // 1. Throughput Line Chart (Smooth Curve)
 const ctxThroughput = document.getElementById('throughputChart').getContext('2d');
 
 // Create Gradient for Line Fill
 const gradientFill = ctxThroughput.createLinearGradient(0, 0, 0, 300);
-gradientFill.addColorStop(0, 'rgba(0, 255, 65, 0.4)');
-gradientFill.addColorStop(1, 'rgba(0, 255, 65, 0.0)');
+gradientFill.addColorStop(0, 'rgba(57, 255, 20, 0.4)');
+gradientFill.addColorStop(1, 'rgba(57, 255, 20, 0.0)');
 
 const throughputData = {
     labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
     datasets: [{
         label: 'Pages Translated',
         data: [1200, 1900, 1500, 2200, 1800, 2500, 3100],
-        borderColor: '#00ff41',
+        borderColor: '#39ff14',
         backgroundColor: gradientFill,
-        borderWidth: 2,
-        pointBackgroundColor: '#0a0e0a',
-        pointBorderColor: '#00ff41',
+        borderWidth: 3,
+        pointBackgroundColor: '#060806',
+        pointBorderColor: '#39ff14',
         pointBorderWidth: 2,
-        pointRadius: 4,
-        pointHoverRadius: 6,
+        pointRadius: 5,
+        pointHoverRadius: 8,
         fill: true,
         tension: 0.4 // Smooth curve (Apple-like)
     }]
@@ -37,12 +38,14 @@ const throughputConfig = {
         plugins: {
             legend: { display: false },
             tooltip: {
-                backgroundColor: 'rgba(10, 20, 10, 0.8)',
-                titleColor: '#00ff41',
-                bodyColor: '#e6ffe6',
-                borderColor: 'rgba(0, 255, 65, 0.2)',
+                backgroundColor: 'rgba(6, 15, 6, 0.9)',
+                titleColor: '#39ff14',
+                bodyColor: '#e0ffe0',
+                borderColor: 'rgba(57, 255, 20, 0.3)',
                 borderWidth: 1,
-                padding: 10,
+                padding: 12,
+                titleFont: { family: "'Rajdhani', sans-serif", size: 16 },
+                bodyFont: { family: "'Rajdhani', sans-serif", size: 14 },
                 displayColors: false,
                 callbacks: {
                     label: function(context) {
@@ -55,14 +58,14 @@ const throughputConfig = {
             y: {
                 beginAtZero: true,
                 grid: {
-                    color: 'rgba(0, 255, 65, 0.05)',
+                    color: 'rgba(57, 255, 20, 0.05)',
                     drawBorder: false,
                 },
-                ticks: { padding: 10 }
+                ticks: { padding: 10, font: { family: "'JetBrains Mono', monospace", size: 11 } }
             },
             x: {
                 grid: { display: false, drawBorder: false },
-                ticks: { padding: 10 }
+                ticks: { padding: 10, font: { family: "'JetBrains Mono', monospace", size: 11 } }
             }
         },
         interaction: { intersect: false, mode: 'index' },
@@ -80,10 +83,10 @@ const apiHealthData = {
     datasets: [{
         data: [8, 2], // 8 active keys, 2 on cooldown
         backgroundColor: [
-            '#00ff41',
-            'rgba(0, 255, 65, 0.1)'
+            '#39ff14',
+            'rgba(57, 255, 20, 0.15)'
         ],
-        borderColor: '#0a0e0a', // Matches background
+        borderColor: '#060806', // Matches background
         borderWidth: 2,
         hoverOffset: 4
     }]
@@ -99,11 +102,12 @@ const apiHealthConfig = {
         plugins: {
             legend: { display: false },
             tooltip: {
-                backgroundColor: 'rgba(10, 20, 10, 0.8)',
-                bodyColor: '#e6ffe6',
-                borderColor: 'rgba(0, 255, 65, 0.2)',
+                backgroundColor: 'rgba(6, 15, 6, 0.9)',
+                bodyColor: '#e0ffe0',
+                borderColor: 'rgba(57, 255, 20, 0.3)',
                 borderWidth: 1,
-                padding: 10,
+                padding: 12,
+                bodyFont: { family: "'Rajdhani', sans-serif", size: 16 },
                 displayColors: true
             }
         }
@@ -181,22 +185,22 @@ const fileInput = document.getElementById('file-input');
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.style.transform = 'scale(1.02)';
-    dropZone.style.borderColor = '#00ff41';
-    dropZone.style.boxShadow = '0 0 20px rgba(0, 255, 65, 0.2)';
+    dropZone.style.borderColor = '#39ff14';
+    dropZone.style.boxShadow = 'inset 0 1px 1px rgba(255, 255, 255, 0.1), 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 25px rgba(57, 255, 20, 0.4)';
 });
 
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
     dropZone.style.transform = 'scale(1)';
-    dropZone.style.borderColor = 'rgba(0, 255, 65, 0.15)';
-    dropZone.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4)';
+    dropZone.style.borderColor = 'rgba(57, 255, 20, 0.25)';
+    dropZone.style.boxShadow = 'inset 0 1px 1px rgba(255, 255, 255, 0.1), inset 0 -2px 10px rgba(57, 255, 20, 0.05), 0 15px 35px rgba(0, 0, 0, 0.7), 0 5px 15px rgba(0, 0, 0, 0.5)';
 });
 
 dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.style.transform = 'scale(1)';
-    dropZone.style.borderColor = 'rgba(0, 255, 65, 0.15)';
-    dropZone.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4)';
+    dropZone.style.borderColor = 'rgba(57, 255, 20, 0.25)';
+    dropZone.style.boxShadow = 'inset 0 1px 1px rgba(255, 255, 255, 0.1), inset 0 -2px 10px rgba(57, 255, 20, 0.05), 0 15px 35px rgba(0, 0, 0, 0.7), 0 5px 15px rgba(0, 0, 0, 0.5)';
 
     if (e.dataTransfer.files.length) {
         handleFileMock(e.dataTransfer.files[0]);
@@ -218,11 +222,11 @@ function handleFileMock(file) {
 
     // Visual feedback
     content.innerHTML = `
-        <div class="upload-icon-large" style="color: #fff">
+        <div class="upload-icon-large" style="color: #fff; text-shadow: 0 0 10px #fff;">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
         </div>
-        <h3 style="color: #00ff41">File Accepted</h3>
-        <p style="color: #fff; font-family: var(--font-tech); font-size: 0.8rem;">${fileName}</p>
+        <h3 style="color: #39ff14; text-shadow: 0 0 10px rgba(57,255,20,0.5);">File Accepted</h3>
+        <p style="color: #e0ffe0; font-family: var(--font-tech); font-size: 0.9rem;">${fileName}</p>
     `;
 
     // Reset after 3 seconds
