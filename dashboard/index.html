@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>user@arch: ~/asost</title>
+    <!-- Fonts: Strictly JetBrains Mono for Tiling Terminal feel -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@100;300;400;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for NerdFont-style Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- Deep Matrix Background Canvas -->
+    <canvas id="matrix-bg"></canvas>
+
+    <!-- Global CRT Scanline & Vignette Overlay -->
+    <div class="crt-overlay"></div>
+    <div class="vignette"></div>
+
+    <!-- Polybar / Waybar style status bar at the top (Riced) -->
+    <header class="polybar">
+        <div class="workspaces">
+            <span class="ws active"><i class="fa-solid fa-server"></i> sys</span>
+            <span class="ws"><i class="fa-solid fa-upload"></i> upl</span>
+            <span class="ws"><i class="fa-solid fa-layer-group"></i> que</span>
+            <span class="ws"><i class="fa-solid fa-key"></i> api</span>
+        </div>
+
+        <div class="window-title">
+            <i class="fa-solid fa-terminal"></i> user@arch: ~/asost_dashboard
+        </div>
+
+        <div class="system-modules">
+            <span class="module"><i class="fa-solid fa-memory"></i> 4.2G/16G</span>
+            <span class="module"><i class="fa-solid fa-microchip"></i> 12%</span>
+            <span class="module"><i class="fa-solid fa-stopwatch"></i> 14d 2h</span>
+            <span class="module hl-green"><i class="fa-solid fa-network-wired"></i> UP</span>
+            <span class="module" id="clock"><i class="fa-regular fa-clock"></i> 14:02:45</span>
+        </div>
+    </header>
+
+    <!-- Tiling Window Manager Layout (Gaps) -->
+    <main class="tiling-layout">
+
+        <!-- Left Column: Neofetch & Upload -->
+        <div class="tile-col left-col">
+
+            <!-- System Stats Terminal -->
+            <div class="window active-window">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/system</span> <span class="cmd">❯</span> neofetch --asost</span>
+                    <span class="window-controls"><i class="fa-solid fa-circle"></i> <i class="fa-solid fa-circle"></i></span>
+                </div>
+                <div class="window-content blur-glass">
+                    <div class="ascii-art glow-text cyberpunk-glitch">
+           _____  ____   _____ _______
+    /\    / ____|/ __ \ / ____|__   __|
+   /  \  | (___ | |  | | (___    | |
+  / /\ \  \___ \| |  | |\___ \   | |
+ / ____ \ ____) | |__| |____) |  | |
+/_/    \_\_____/ \____/|_____/   |_|
+                    </div>
+
+                    <!-- Technical Quote instead of fake OS data -->
+                    <div style="border-left: 2px solid var(--term-green); padding-left: 10px; margin-bottom: 15px;">
+                        <div style="color: var(--text-primary); font-style: italic; font-size: 0.9em;">"Translation is not a matter of words only: it is a matter of making intelligible a whole culture."</div>
+                        <div style="color: var(--text-muted); font-size: 0.8em; margin-top: 4px;">— Anthony Burgess</div>
+                    </div>
+
+                    <div class="stats-grid-term" style="margin-bottom: 10px;">
+                        <div class="stat-line">
+                            <span class="key keyword">Engine:</span>
+                            <span class="val string">ASOST Translation Core v2.4</span>
+                        </div>
+                        <div class="stat-line">
+                            <span class="key keyword">Model:</span>
+                            <span class="val string">Gemini-2.5-Pro</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Upload Terminal -->
+            <div class="window">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/upload</span> <span class="cmd">❯</span> ./dropzone</span>
+                </div>
+                <div class="window-content upload-zone-term blur-glass" id="drop-zone" style="height: 100%; padding: 12px;">
+                    <div class="border-box" style="width: 100%;">
+                        <p class="center-text comment">/* DROP PDF/DOCX FILES HERE */</p>
+                        <p class="center-text glow-text"><i class="fa-solid fa-file-import fa-2x"></i></p>
+                        <p class="center-text string">[ CLICK TO BROWSE ]</p>
+                        <input type="file" id="file-input" hidden>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Center Column: Charts -->
+        <div class="tile-col center-col">
+
+            <!-- Top Row in Center: Line Chart & Doughnut Side-by-Side -->
+            <div class="tile-row" style="height: 250px;">
+
+                <!-- Main Throughput Chart (Left side) -->
+                <div class="window" style="flex: 2;">
+                    <div class="window-bar">
+                        <span class="prompt"><span class="path">~/throughput</span> <span class="cmd">❯</span> plot --last 7d</span>
+                    </div>
+                    <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px;">
+                        <canvas id="throughputChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- API Doughnut (Right side) -->
+                <div class="window" style="flex: 1;">
+                    <div class="window-bar">
+                        <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> ./health</span>
+                    </div>
+                    <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px; position: relative;">
+                        <canvas id="apiChart"></canvas>
+                        <!-- Overlay Text inside doughnut -->
+                        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;">
+                            <div style="color: var(--term-green-bright); font-size: 1.2em; font-weight: bold;">60%</div>
+                            <div style="color: var(--text-muted); font-size: 0.7em;">ACTIVE</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Bottom Window in Center: Global Stats -->
+            <div class="window" style="flex-grow: 1;">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/stats</span> <span class="cmd">❯</span> cat db.json</span>
+                </div>
+                <div class="window-content blur-glass" style="padding: 16px;">
+                    <div class="stats-grid-term" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div class="stat-line"><span class="key keyword">books_translated:</span> <span class="val number">1204</span></div>
+                        <div class="stat-line"><span class="key keyword">pages_processed :</span> <span class="val number">452000</span></div>
+                        <div class="stat-line"><span class="key keyword">active_threads  :</span> <span class="val number">12</span></div>
+                        <div class="stat-line"><span class="key keyword">last_job_id     :</span> <span class="val string">"A-9021"</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Column: Logs & Jobs -->
+        <div class="tile-col right-col">
+
+            <!-- Top Right: Live Jobs (htop style) -->
+            <div class="window" style="flex: 1; max-height: 250px;">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/tasks</span> <span class="cmd">❯</span> htop --filter=trans</span>
+                </div>
+                <div class="window-content terminal-body-term blur-glass" id="jobs-output" style="font-size: 0.9em; overflow-y: hidden;">
+                    <!-- JS injects ASCII progress bars here -->
+                </div>
+            </div>
+
+            <!-- Bottom Right: Main System Log -->
+            <div class="window log-window" style="flex: 2;">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/logs</span> <span class="cmd">❯</span> tail -f system.log</span>
+                </div>
+                <div class="window-content terminal-body-term blur-glass" id="terminal-output" style="font-size: 0.9em;">
+                    <!-- Logs injected via JS -->
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
