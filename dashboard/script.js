@@ -1,31 +1,32 @@
-// Global Chart Settings to match the Cyberpunk / Glassmorphism theme
-Chart.defaults.color = '#9ddb9d';
-Chart.defaults.font.family = "'Rajdhani', sans-serif";
-Chart.defaults.font.size = 14;
+// Arch Terminal Tiling UI - JS Logic
 
-// 1. Throughput Line Chart (Smooth Curve)
+// 1. Chart.js Config for Terminal Aesthetic
+Chart.defaults.color = '#555555';
+Chart.defaults.font.family = "'JetBrains Mono', monospace";
+Chart.defaults.font.size = 12;
+
+const termGreen = '#466600';
+const termGreenBright = '#699900';
+const bgWindow = '#0a0a0a';
+const borderMuted = '#222222';
+
 const ctxThroughput = document.getElementById('throughputChart').getContext('2d');
 
-// Create Gradient for Line Fill
-const gradientFill = ctxThroughput.createLinearGradient(0, 0, 0, 300);
-gradientFill.addColorStop(0, 'rgba(57, 255, 20, 0.4)');
-gradientFill.addColorStop(1, 'rgba(57, 255, 20, 0.0)');
-
 const throughputData = {
-    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    labels: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'],
     datasets: [{
-        label: 'Pages Translated',
+        label: 'PG_PROC',
         data: [1200, 1900, 1500, 2200, 1800, 2500, 3100],
-        borderColor: '#39ff14',
-        backgroundColor: gradientFill,
-        borderWidth: 3,
-        pointBackgroundColor: '#060806',
-        pointBorderColor: '#39ff14',
-        pointBorderWidth: 2,
-        pointRadius: 5,
-        pointHoverRadius: 8,
-        fill: true,
-        tension: 0.4 // Smooth curve (Apple-like)
+        borderColor: termGreenBright,
+        backgroundColor: 'transparent',
+        borderWidth: 1, // Thin terminal lines
+        pointBackgroundColor: bgWindow,
+        pointBorderColor: termGreenBright,
+        pointBorderWidth: 1,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        fill: false,
+        tension: 0.0 // Sharp angles, no curves
     }]
 };
 
@@ -38,18 +39,19 @@ const throughputConfig = {
         plugins: {
             legend: { display: false },
             tooltip: {
-                backgroundColor: 'rgba(6, 15, 6, 0.9)',
-                titleColor: '#39ff14',
-                bodyColor: '#e0ffe0',
-                borderColor: 'rgba(57, 255, 20, 0.3)',
+                backgroundColor: bgWindow,
+                titleColor: termGreenBright,
+                bodyColor: '#a0a0a0',
+                borderColor: termGreen,
                 borderWidth: 1,
-                padding: 12,
-                titleFont: { family: "'Rajdhani', sans-serif", size: 16 },
-                bodyFont: { family: "'Rajdhani', sans-serif", size: 14 },
+                padding: 8,
+                titleFont: { family: "'JetBrains Mono', monospace", size: 12 },
+                bodyFont: { family: "'JetBrains Mono', monospace", size: 12 },
                 displayColors: false,
+                cornerRadius: 0, // Sharp tooltips
                 callbacks: {
                     label: function(context) {
-                        return context.parsed.y + ' Pages';
+                        return '> ' + context.parsed.y + ' pgs';
                     }
                 }
             }
@@ -58,14 +60,18 @@ const throughputConfig = {
             y: {
                 beginAtZero: true,
                 grid: {
-                    color: 'rgba(57, 255, 20, 0.05)',
+                    color: borderMuted,
                     drawBorder: false,
                 },
-                ticks: { padding: 10, font: { family: "'JetBrains Mono', monospace", size: 11 } }
+                ticks: { padding: 8, color: termGreen }
             },
             x: {
-                grid: { display: false, drawBorder: false },
-                ticks: { padding: 10, font: { family: "'JetBrains Mono', monospace", size: 11 } }
+                grid: {
+                    color: borderMuted,
+                    drawBorder: false,
+                    tickLength: 4
+                },
+                ticks: { padding: 8, color: termGreen }
             }
         },
         interaction: { intersect: false, mode: 'index' },
@@ -75,170 +81,141 @@ const throughputConfig = {
 new Chart(ctxThroughput, throughputConfig);
 
 
-// 2. API Health Doughnut Chart
-const ctxApiHealth = document.getElementById('apiHealthChart').getContext('2d');
-
-const apiHealthData = {
-    labels: ['Active', 'Cooldown'],
-    datasets: [{
-        data: [8, 2], // 8 active keys, 2 on cooldown
-        backgroundColor: [
-            '#39ff14',
-            'rgba(57, 255, 20, 0.15)'
-        ],
-        borderColor: '#060806', // Matches background
-        borderWidth: 2,
-        hoverOffset: 4
-    }]
-};
-
-const apiHealthConfig = {
-    type: 'doughnut',
-    data: apiHealthData,
-    options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        cutout: '80%', // Thin elegant ring
-        plugins: {
-            legend: { display: false },
-            tooltip: {
-                backgroundColor: 'rgba(6, 15, 6, 0.9)',
-                bodyColor: '#e0ffe0',
-                borderColor: 'rgba(57, 255, 20, 0.3)',
-                borderWidth: 1,
-                padding: 12,
-                bodyFont: { family: "'Rajdhani', sans-serif", size: 16 },
-                displayColors: true
-            }
-        }
-    }
-};
-
-new Chart(ctxApiHealth, apiHealthConfig);
-
-
-// --- Interactive Terminal Simulation ---
+// 2. Terminal Log Animation
 const terminalBody = document.getElementById('terminal-output');
 
-const logs = [
-    { type: 'info', msg: 'System initialized. All core modules active.' },
-    { type: 'info', msg: 'DB connection established. Latency: 4ms' },
-    { type: 'warn', msg: 'Key [AIzaSyCq9...] approaching TPM limit.' },
-    { type: 'info', msg: 'Started dynamic chunking for [Neuro_Ch1.pdf]' },
-    { type: 'info', msg: 'Translation engine: Gemini-2.5-Pro loaded.' },
+const initLogs = [
+    { type: 'sys', msg: 'archlinux x86_64 loaded.' },
+    { type: 'sys', msg: 'asost-daemon v2.4.1 starting...' },
+    { type: 'info', msg: 'connecting to main sqlite db [OK]' },
+    { type: 'info', msg: 'worker pool initialized (4 threads)' },
+    { type: 'warn', msg: 'tpm limit near for key: AIzaSyCq9' },
+    { type: 'info', msg: 'listening on port 8080' },
 ];
 
 let logIndex = 0;
 
 function getTimestamp() {
     const now = new Date();
-    return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+    return `[${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}]`;
 }
 
-function appendLog() {
-    if (logIndex >= logs.length) {
-        // Generate continuous random dummy logs to keep the UI feeling alive
-        const operations = ['Extracting', 'Translating', 'Formatting', 'Verifying'];
-        const files = ['Ch3_Matrix.pdf', 'Ghost_Shell_Doc.docx', 'Blade_Runner.pdf'];
-        const op = operations[Math.floor(Math.random() * operations.length)];
-        const file = files[Math.floor(Math.random() * files.length)];
-
-        logs.push({
-            type: Math.random() > 0.85 ? 'warn' : 'info',
-            msg: `${op} ${file}... OK`
-        });
-    }
-
-    const log = logs[logIndex];
+function renderLog(log) {
     const logEl = document.createElement('div');
 
     let colorClass = 'log-info';
-    let prefix = '[SYS]';
+    let prefix = '';
 
-    if (log.type === 'warn') { colorClass = 'log-warn'; prefix = '[WRN]'; }
-    if (log.type === 'error') { colorClass = 'log-error'; prefix = '[ERR]'; }
+    if (log.type === 'sys')  { colorClass = 'log-sys'; }
+    if (log.type === 'warn') { colorClass = 'log-warn'; prefix = 'WARN: '; }
+    if (log.type === 'err')  { colorClass = 'log-err'; prefix = 'ERR: '; }
 
-    logEl.innerHTML = `<span class="log-time">${getTimestamp()}</span> <span class="${colorClass}">${prefix} ${log.msg}</span>`;
-
+    logEl.innerHTML = `<span class="log-time">${getTimestamp()}</span> <span class="${colorClass}">${prefix}${log.msg}</span>`;
     terminalBody.appendChild(logEl);
 
-    // Auto scroll to bottom smoothly
-    terminalBody.scrollTo({
-        top: terminalBody.scrollHeight,
-        behavior: 'smooth'
-    });
-
-    logIndex++;
-
-    // Trigger next log randomly between 2s and 5s
-    const nextTimeout = Math.random() * 3000 + 2000;
-    setTimeout(appendLog, nextTimeout);
+    terminalBody.scrollTop = terminalBody.scrollHeight;
 }
 
-// Start terminal logs after a slight delay
-setTimeout(appendLog, 1500);
+// Initial burst of logs
+initLogs.forEach(log => {
+    setTimeout(() => renderLog(log), Math.random() * 1000);
+});
 
-// --- Sleek Upload Zone Interactivity ---
+// Continuous dummy logs
+function appendContinuousLog() {
+    const operations = ['extract_pdf', 'chunk_text', 'gemini_req', 'save_db'];
+    const files = ['Neuro_Ch1.pdf', 'Quantum.docx', 'BladeRunner.pdf'];
+    const op = operations[Math.floor(Math.random() * operations.length)];
+    const file = files[Math.floor(Math.random() * files.length)];
+
+    const isWarn = Math.random() > 0.9;
+
+    renderLog({
+        type: isWarn ? 'warn' : 'info',
+        msg: `${op} -> ${file} [${isWarn ? 'DELAY' : 'OK'}]`
+    });
+
+    const nextTimeout = Math.random() * 4000 + 1000;
+    setTimeout(appendContinuousLog, nextTimeout);
+}
+
+setTimeout(appendContinuousLog, 2500);
+
+
+// 3. ASCII Upload Zone Interactivity
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
+const borderBox = dropZone.querySelector('.border-box');
+
+const normalText = `===========================
+ DROP PDF/DOCX FILES HERE
+     [  _ _ _ _ _ _  ]
+       CLICK TO BROWSE
+===========================`;
+
+const hoverText = `===========================
+      !!! INCOMING !!!
+     [  > > > < < <  ]
+       RELEASE MOUSE
+===========================`;
+
+const droppedText = `===========================
+        FILE QUEUED
+     [  # # # # # #  ]
+      PROCESSING...
+===========================`;
+
+dropZone.addEventListener('click', () => fileInput.click());
 
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
-    dropZone.style.transform = 'scale(1.02)';
-    dropZone.style.borderColor = '#39ff14';
-    dropZone.style.boxShadow = 'inset 0 1px 1px rgba(255, 255, 255, 0.1), 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 25px rgba(57, 255, 20, 0.4)';
+    borderBox.innerHTML = hoverText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
+    borderBox.style.borderColor = termGreenBright;
+    borderBox.style.color = termGreenBright;
 });
 
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
-    dropZone.style.transform = 'scale(1)';
-    dropZone.style.borderColor = 'rgba(57, 255, 20, 0.25)';
-    dropZone.style.boxShadow = 'inset 0 1px 1px rgba(255, 255, 255, 0.1), inset 0 -2px 10px rgba(57, 255, 20, 0.05), 0 15px 35px rgba(0, 0, 0, 0.7), 0 5px 15px rgba(0, 0, 0, 0.5)';
+    borderBox.innerHTML = normalText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
+    borderBox.style.borderColor = '';
+    borderBox.style.color = '';
 });
 
 dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
-    dropZone.style.transform = 'scale(1)';
-    dropZone.style.borderColor = 'rgba(57, 255, 20, 0.25)';
-    dropZone.style.boxShadow = 'inset 0 1px 1px rgba(255, 255, 255, 0.1), inset 0 -2px 10px rgba(57, 255, 20, 0.05), 0 15px 35px rgba(0, 0, 0, 0.7), 0 5px 15px rgba(0, 0, 0, 0.5)';
-
     if (e.dataTransfer.files.length) {
-        handleFileMock(e.dataTransfer.files[0]);
+        handleFileTermMock(e.dataTransfer.files[0].name);
     }
 });
 
 fileInput.addEventListener('change', (e) => {
     if (e.target.files.length) {
-        handleFileMock(e.target.files[0]);
+        handleFileTermMock(e.target.files[0].name);
     }
 });
 
-function handleFileMock(file) {
-    const fileName = file.name;
-    const content = dropZone.querySelector('.upload-content');
+function handleFileTermMock(fileName) {
+    // Terminal visual
+    borderBox.innerHTML = droppedText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
+    borderBox.innerHTML += `<p class="center-text" style="color: #a0a0a0">${fileName}</p>`;
+    borderBox.style.borderColor = termGreen;
+    borderBox.style.color = termGreen;
 
-    // Add upload event to terminal
-    logs.push({ type: 'info', msg: `Upload initiated: ${fileName}` });
+    // Log
+    renderLog({ type: 'sys', msg: `received upload: ${fileName}` });
 
-    // Visual feedback
-    content.innerHTML = `
-        <div class="upload-icon-large" style="color: #fff; text-shadow: 0 0 10px #fff;">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-        </div>
-        <h3 style="color: #39ff14; text-shadow: 0 0 10px rgba(57,255,20,0.5);">File Accepted</h3>
-        <p style="color: #e0ffe0; font-family: var(--font-tech); font-size: 0.9rem;">${fileName}</p>
-    `;
-
-    // Reset after 3 seconds
+    // Reset
     setTimeout(() => {
-        content.innerHTML = `
-            <div class="upload-icon-large">
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-            </div>
-            <h3>Upload Document</h3>
-            <p>Drag PDF or DOCX here</p>
-            <button class="btn-primary" onclick="document.getElementById('file-input').click()">Browse Files</button>
-            <input type="file" id="file-input" hidden>
-        `;
+        borderBox.innerHTML = normalText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
+        borderBox.style.borderColor = '';
+        borderBox.style.color = '';
+        fileInput.value = '';
     }, 3000);
 }
+
+// Simple clock update for Polybar
+setInterval(() => {
+    const clock = document.getElementById('clock');
+    const now = new Date();
+    clock.innerText = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+}, 1000);
