@@ -8,30 +8,40 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@100;300;400;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for NerdFont-style Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-    <!-- Polybar / Waybar style status bar at the top -->
+    <!-- Deep Matrix Background Canvas -->
+    <canvas id="matrix-bg"></canvas>
+
+    <!-- Global CRT Scanline & Vignette Overlay -->
+    <div class="crt-overlay"></div>
+    <div class="vignette"></div>
+
+    <!-- Polybar / Waybar style status bar at the top (Riced) -->
     <header class="polybar">
         <div class="workspaces">
-            <span class="ws active">[1:sys]</span>
-            <span class="ws">[2:upload]</span>
-            <span class="ws">[3:queue]</span>
-            <span class="ws">[4:api]</span>
+            <span class="ws active"><i class="fa-solid fa-server"></i> sys</span>
+            <span class="ws"><i class="fa-solid fa-upload"></i> upl</span>
+            <span class="ws"><i class="fa-solid fa-layer-group"></i> que</span>
+            <span class="ws"><i class="fa-solid fa-key"></i> api</span>
         </div>
 
         <div class="window-title">
-            user@arch: ~/asost_dashboard
+            <i class="fa-solid fa-terminal"></i> user@arch: ~/asost_dashboard
         </div>
 
         <div class="system-modules">
-            <span class="module">MEM: 4.2G/16G</span>
-            <span class="module">CPU: 12%</span>
-            <span class="module">UP: 14d 2h</span>
-            <span class="module" id="clock">14:02:45</span>
+            <span class="module"><i class="fa-solid fa-memory"></i> 4.2G/16G</span>
+            <span class="module"><i class="fa-solid fa-microchip"></i> 12%</span>
+            <span class="module"><i class="fa-solid fa-stopwatch"></i> 14d 2h</span>
+            <span class="module hl-green"><i class="fa-solid fa-network-wired"></i> UP</span>
+            <span class="module" id="clock"><i class="fa-regular fa-clock"></i> 14:02:45</span>
         </div>
     </header>
 
@@ -44,10 +54,11 @@
             <!-- System Stats Terminal -->
             <div class="window active-window">
                 <div class="window-bar">
-                    <span class="prompt">user@arch: ~/stats $ ./monitor</span>
+                    <span class="prompt"><span class="path">~/stats</span> <span class="cmd">❯</span> ./monitor</span>
+                    <span class="window-controls"><i class="fa-solid fa-circle"></i> <i class="fa-solid fa-circle"></i></span>
                 </div>
-                <div class="window-content">
-                    <div class="ascii-art">
+                <div class="window-content blur-glass">
+                    <div class="ascii-art glow-text">
      ___   _____  ____  _____  _______
     /   | / ___/ / __ \/ ___/ /__  __/
    / /| | \__ \ / / / /\__ \    / /
@@ -56,24 +67,24 @@
                     </div>
                     <div class="stats-grid-term">
                         <div class="stat-line">
-                            <span class="key">books_translated:</span>
-                            <span class="val">1204</span>
+                            <span class="key keyword">books_translated:</span>
+                            <span class="val number">1204</span>
                         </div>
                         <div class="stat-line">
-                            <span class="key">pages_processed :</span>
-                            <span class="val">452000</span>
+                            <span class="key keyword">pages_processed :</span>
+                            <span class="val number">452000</span>
                         </div>
                         <div class="stat-line">
-                            <span class="key">active_threads  :</span>
-                            <span class="val">12</span>
+                            <span class="key keyword">active_threads  :</span>
+                            <span class="val number">12</span>
                         </div>
                         <div class="stat-line">
-                            <span class="key">api_health      :</span>
-                            <span class="val">99.8%</span>
+                            <span class="key keyword">api_health      :</span>
+                            <span class="val string">"99.8%"</span>
                         </div>
                         <div class="stat-line">
-                            <span class="key">last_job_id     :</span>
-                            <span class="val">A-9021</span>
+                            <span class="key keyword">last_job_id     :</span>
+                            <span class="val string">"A-9021"</span>
                         </div>
                     </div>
                 </div>
@@ -82,15 +93,13 @@
             <!-- Upload Terminal -->
             <div class="window">
                 <div class="window-bar">
-                    <span class="prompt">user@arch: ~/upload $ ./dropzone</span>
+                    <span class="prompt"><span class="path">~/upload</span> <span class="cmd">❯</span> ./dropzone</span>
                 </div>
-                <div class="window-content upload-zone-term" id="drop-zone">
+                <div class="window-content upload-zone-term blur-glass" id="drop-zone">
                     <div class="border-box">
-                        <p class="center-text">===========================</p>
-                        <p class="center-text"> DROP PDF/DOCX FILES HERE  </p>
-                        <p class="center-text">     [  _ _ _ _ _ _  ]     </p>
-                        <p class="center-text">       CLICK TO BROWSE     </p>
-                        <p class="center-text">===========================</p>
+                        <p class="center-text comment">/* DROP PDF/DOCX FILES HERE */</p>
+                        <p class="center-text glow-text"><i class="fa-solid fa-file-import fa-2x"></i></p>
+                        <p class="center-text string">[ CLICK TO BROWSE ]</p>
                         <input type="file" id="file-input" hidden>
                     </div>
                 </div>
@@ -104,9 +113,9 @@
             <!-- Top Right: Charts -->
             <div class="window">
                 <div class="window-bar">
-                    <span class="prompt">user@arch: ~/throughput $ plot --last 7d</span>
+                    <span class="prompt"><span class="path">~/throughput</span> <span class="cmd">❯</span> plot --last 7d</span>
                 </div>
-                <div class="window-content chart-container-term">
+                <div class="window-content chart-container-term blur-glass">
                     <canvas id="throughputChart"></canvas>
                 </div>
             </div>
@@ -117,9 +126,9 @@
                 <!-- API Status -->
                 <div class="window api-window">
                     <div class="window-bar">
-                        <span class="prompt">user@arch: ~/api $ keys --status</span>
+                        <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> keys --status</span>
                     </div>
-                    <div class="window-content api-content-term">
+                    <div class="window-content api-content-term blur-glass">
                         <table class="term-table">
                             <thead>
                                 <tr>
@@ -129,11 +138,11 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr><td>...KqxBAW5</td><td class="ok">[OK]</td><td>12k</td></tr>
-                                <tr><td>...HzjRRO-</td><td class="warn">[COOL]</td><td>30k</td></tr>
-                                <tr><td>...PlXAe19</td><td class="ok">[OK]</td><td>5k</td></tr>
-                                <tr><td>...l1Q4C7p</td><td class="ok">[OK]</td><td>0k</td></tr>
-                                <tr><td>...MnHC1ZC</td><td class="ok">[OK]</td><td>2k</td></tr>
+                                <tr><td>...KqxBAW5</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">12k</td></tr>
+                                <tr><td>...HzjRRO-</td><td class="warn"><i class="fa-solid fa-snowflake"></i> [COOL]</td><td class="number">30k</td></tr>
+                                <tr><td>...PlXAe19</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">5k</td></tr>
+                                <tr><td>...l1Q4C7p</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">0k</td></tr>
+                                <tr><td>...MnHC1ZC</td><td class="ok glow-text"><i class="fa-solid fa-check"></i> [OK]</td><td class="number">2k</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -142,9 +151,9 @@
                 <!-- Main System Log -->
                 <div class="window log-window">
                     <div class="window-bar">
-                        <span class="prompt">user@arch: ~/logs $ tail -f system.log</span>
+                        <span class="prompt"><span class="path">~/logs</span> <span class="cmd">❯</span> tail -f system.log</span>
                     </div>
-                    <div class="window-content terminal-body-term" id="terminal-output">
+                    <div class="window-content terminal-body-term blur-glass" id="terminal-output">
                         <!-- Logs injected via JS -->
                     </div>
                 </div>

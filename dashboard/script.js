@@ -1,14 +1,15 @@
 // Arch Terminal Tiling UI - JS Logic
 
 // 1. Chart.js Config for Terminal Aesthetic
-Chart.defaults.color = '#555555';
+Chart.defaults.color = '#7c6f64'; // muted
 Chart.defaults.font.family = "'JetBrains Mono', monospace";
 Chart.defaults.font.size = 12;
 
 const termGreen = '#466600';
-const termGreenBright = '#699900';
-const bgWindow = '#0a0a0a';
-const borderMuted = '#222222';
+const termGreenBright = '#8ab800';
+const termBlue = '#458588';
+const bgWindow = 'rgba(10, 10, 10, 0.8)';
+const borderMuted = 'rgba(70, 102, 0, 0.3)';
 
 const ctxThroughput = document.getElementById('throughputChart').getContext('2d');
 
@@ -121,7 +122,7 @@ initLogs.forEach(log => {
     setTimeout(() => renderLog(log), Math.random() * 1000);
 });
 
-// Continuous dummy logs
+// Continuous dummy logs with "Syntax Highlighting"
 function appendContinuousLog() {
     const operations = ['extract_pdf', 'chunk_text', 'gemini_req', 'save_db'];
     const files = ['Neuro_Ch1.pdf', 'Quantum.docx', 'BladeRunner.pdf'];
@@ -129,10 +130,14 @@ function appendContinuousLog() {
     const file = files[Math.floor(Math.random() * files.length)];
 
     const isWarn = Math.random() > 0.9;
+    const statusText = isWarn ? 'DELAY' : 'OK';
+    const statusClass = isWarn ? 'number' : 'log-sys'; // Using orange for warn, green for ok
+
+    const formattedMsg = `<span class="keyword">${op}</span> <span class="punct">-></span> <span class="string">"${file}"</span> <span class="punct">[</span><span class="${statusClass}">${statusText}</span><span class="punct">]</span>`;
 
     renderLog({
         type: isWarn ? 'warn' : 'info',
-        msg: `${op} -> ${file} [${isWarn ? 'DELAY' : 'OK'}]`
+        msg: formattedMsg
     });
 
     const nextTimeout = Math.random() * 4000 + 1000;
@@ -147,38 +152,28 @@ const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const borderBox = dropZone.querySelector('.border-box');
 
-const normalText = `===========================
- DROP PDF/DOCX FILES HERE
-     [  _ _ _ _ _ _  ]
-       CLICK TO BROWSE
-===========================`;
+const normalHtml = `
+    <p class="center-text comment">/* DROP PDF/DOCX FILES HERE */</p>
+    <p class="center-text glow-text"><i class="fa-solid fa-file-import fa-2x"></i></p>
+    <p class="center-text string">[ CLICK TO BROWSE ]</p>
+`;
 
-const hoverText = `===========================
-      !!! INCOMING !!!
-     [  > > > < < <  ]
-       RELEASE MOUSE
-===========================`;
-
-const droppedText = `===========================
-        FILE QUEUED
-     [  # # # # # #  ]
-      PROCESSING...
-===========================`;
+const hoverHtml = `
+    <p class="center-text comment">/* !!! INCOMING !!! */</p>
+    <p class="center-text glow-text" style="color: var(--term-orange)"><i class="fa-solid fa-parachute-box fa-2x"></i></p>
+    <p class="center-text string" style="color: var(--term-orange)">[ RELEASE MOUSE ]</p>
+`;
 
 dropZone.addEventListener('click', () => fileInput.click());
 
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
-    borderBox.innerHTML = hoverText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
-    borderBox.style.borderColor = termGreenBright;
-    borderBox.style.color = termGreenBright;
+    borderBox.innerHTML = hoverHtml;
 });
 
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
-    borderBox.innerHTML = normalText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
-    borderBox.style.borderColor = '';
-    borderBox.style.color = '';
+    borderBox.innerHTML = normalHtml;
 });
 
 dropZone.addEventListener('drop', (e) => {
@@ -196,19 +191,18 @@ fileInput.addEventListener('change', (e) => {
 
 function handleFileTermMock(fileName) {
     // Terminal visual
-    borderBox.innerHTML = droppedText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
-    borderBox.innerHTML += `<p class="center-text" style="color: #a0a0a0">${fileName}</p>`;
-    borderBox.style.borderColor = termGreen;
-    borderBox.style.color = termGreen;
+    borderBox.innerHTML = `
+        <p class="center-text comment">/* FILE QUEUED */</p>
+        <p class="center-text glow-text" style="color: var(--term-blue)"><i class="fa-solid fa-check-double fa-2x"></i></p>
+        <p class="center-text string">"${fileName}"</p>
+    `;
 
     // Log
-    renderLog({ type: 'sys', msg: `received upload: ${fileName}` });
+    renderLog({ type: 'sys', msg: `<span class="keyword">received_upload</span> <span class="punct">:</span> <span class="string">"${fileName}"</span>` });
 
     // Reset
     setTimeout(() => {
-        borderBox.innerHTML = normalText.split('\n').map(l => `<p class="center-text">${l}</p>`).join('');
-        borderBox.style.borderColor = '';
-        borderBox.style.color = '';
+        borderBox.innerHTML = normalHtml;
         fileInput.value = '';
     }, 3000);
 }
@@ -219,3 +213,51 @@ setInterval(() => {
     const now = new Date();
     clock.innerText = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
 }, 1000);
+
+// --- Matrix Rain Background Effect ---
+const canvas = document.getElementById('matrix-bg');
+const ctx = canvas.getContext('2d');
+
+let width, height;
+let columns;
+const fontSize = 14;
+let drops = [];
+
+function initMatrix() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    columns = Math.floor(width / fontSize);
+    drops = [];
+    for (let i = 0; i < columns; i++) {
+        drops[i] = Math.random() * -100; // Start off screen randomly
+    }
+}
+
+window.addEventListener('resize', initMatrix);
+initMatrix();
+
+// Binary and hex characters
+const chars = "010101010101010101010101010101010101010101ABCDEF".split("");
+
+function drawMatrix() {
+    // Translucent black to create fade effect
+    ctx.fillStyle = 'rgba(5, 5, 5, 0.05)';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = 'rgba(70, 102, 0, 0.3)'; // Dim green
+    ctx.font = fontSize + 'px "JetBrains Mono"';
+
+    for (let i = 0; i < drops.length; i++) {
+        const text = chars[Math.floor(Math.random() * chars.length)];
+        ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+
+        if (drops[i] * fontSize > height && Math.random() > 0.975) {
+            drops[i] = 0;
+        }
+        drops[i]++;
+    }
+
+    requestAnimationFrame(drawMatrix);
+}
+
+drawMatrix();
