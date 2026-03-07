@@ -5,9 +5,12 @@
 'use strict';
 
 // ── Chart.js defaults ───────────────────────────────────────────
-Chart.defaults.color       = '#7c6f64';
-Chart.defaults.font.family = "'JetBrains Mono', monospace";
-Chart.defaults.font.size   = 10;
+if (typeof Chart !== 'undefined' && Chart.defaults) {
+    if (!Chart.defaults.font) Chart.defaults.font = {};
+    Chart.defaults.color       = '#7c6f64';
+    Chart.defaults.font.family = "'JetBrains Mono', monospace";
+    Chart.defaults.font.size   = 10;
+}
 
 const C = {
     green:   '#8ab800',
@@ -70,7 +73,7 @@ document.querySelectorAll('.ctrl-max').forEach(btn => {
         const el = document.getElementById(btn.dataset.win);
         if (!el) return;
         el.classList.toggle('maximized');
-        setTimeout(() => { Object.values(Chart.instances).forEach(c => c.resize()); }, 60);
+        setTimeout(() => { if (typeof Chart !== 'undefined' && Chart.instances) Object.values(Chart.instances).forEach(c => c.resize()); }, 60);
     });
 });
 document.addEventListener('keydown', e => {
@@ -135,7 +138,7 @@ for (let i = 19; i >= 0; i--) {
     tpmC.push(Math.floor(8000  + Math.random() * 42000));
 }
 
-const tpmChart = new Chart(document.getElementById('tpmChart'), {
+const tpmChart = typeof Chart !== 'undefined' ? new Chart(document.getElementById('tpmChart'), {
     type: 'line',
     data: {
         labels: tpmLabels,
@@ -161,8 +164,9 @@ const tpmChart = new Chart(document.getElementById('tpmChart'), {
         },
         interaction:{intersect:false, mode:'index'},
     },
-});
+}) : null;
 
+if (typeof Chart !== 'undefined') {
 Chart.register({
     id:'dangerLine',
     afterDraw(chart) {
@@ -175,6 +179,7 @@ Chart.register({
         ctx.restore();
     }
 });
+}
 
 setInterval(() => {
     const t = new Date();
@@ -190,7 +195,7 @@ setInterval(() => {
         if (arr.at(-1) > 58000) asostAddLog(`<span class="keyword">${nm}</span> nearing TPM limit: <span class="number">${arr.at(-1).toLocaleString()}</span>/60K`, 'warn');
     });
 
-    tpmChart.update('none');
+    if (tpmChart) tpmChart.update('none');
     updateApiStats();
     // Also update topo edge weights
     topoEdgeLoad[0] = tpmA.at(-1) / 60000;
@@ -201,7 +206,7 @@ setInterval(() => {
 // ================================================================
 //  6. RADAR CHART
 // ================================================================
-const radarChart = new Chart(document.getElementById('radarChart'), {
+const radarChart = typeof Chart !== 'undefined' ? new Chart(document.getElementById('radarChart'), {
     type:'radar',
     data:{
         labels:['PDF','DOCX','TXT','SUCCESS','SPEED','ERRORS'],
@@ -222,9 +227,10 @@ const radarChart = new Chart(document.getElementById('radarChart'), {
             ticks:{display:false},
         }},
     },
-});
+}) : null;
 
 setInterval(() => {
+    if (!radarChart) return;
     const data = radarChart.data.datasets[0].data;
     data[0] = Math.max(70, Math.min(95, data[0] + (Math.random() - 0.5) * 5)); // PDF
     data[1] = Math.max(40, Math.min(80, data[1] + (Math.random() - 0.5) * 5)); // DOCX
@@ -238,14 +244,14 @@ setInterval(() => {
 // ================================================================
 //  7. API DOUGHNUT (hidden — data only for modal counts)
 // ================================================================
-const apiDoughnut = new Chart(document.getElementById('apiChart'), {
+const apiDoughnut = typeof Chart !== 'undefined' ? new Chart(document.getElementById('apiChart'), {
     type:'doughnut',
     data:{
         labels:['ACTIVE','COOLING','EXHAUSTED'],
         datasets:[{ data:[3,1,1], backgroundColor:[C.green,C.purple,C.red], borderWidth:0 }],
     },
     options:{ responsive:false, plugins:{legend:{display:false}} },
-});
+}) : null;
 
 // ================================================================
 //  8. API KEYS DATA
@@ -262,8 +268,10 @@ function updateApiStats() {
     const active    = apiKeys.filter(k => k.status==='ACTIVE' && !k.disabled).length;
     const cooling   = apiKeys.filter(k => k.status==='COOLING').length;
     const exhausted = apiKeys.filter(k => k.status==='EXHAUSTED').length;
-    apiDoughnut.data.datasets[0].data = [active, cooling, exhausted];
-    apiDoughnut.update('none');
+    if (apiDoughnut) {
+        apiDoughnut.data.datasets[0].data = [active, cooling, exhausted];
+        apiDoughnut.update('none');
+    }
     if (document.getElementById('api-modal').classList.contains('open')) renderApiTable();
 }
 
@@ -1149,7 +1157,7 @@ function initMatrix() {
 }
 window.addEventListener('resize', () => {
     initMatrix();
-    Object.values(Chart.instances).forEach(c=>c.resize());
+    if (typeof Chart !== 'undefined' && Chart.instances) Object.values(Chart.instances).forEach(c=>c.resize());
 });
 initMatrix();
 function drawMatrix() {
