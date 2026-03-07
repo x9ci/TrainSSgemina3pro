@@ -9,6 +9,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- interact.js for dragging and resizing -->
+    <script src="https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -23,19 +25,18 @@
     <!-- Polybar / Waybar style status bar at the top (Riced) -->
     <header class="polybar">
         <div class="workspaces">
-            <span class="ws active"><i class="fa-solid fa-server"></i> sys</span>
-            <span class="ws"><i class="fa-solid fa-upload"></i> upl</span>
-            <span class="ws"><i class="fa-solid fa-layer-group"></i> que</span>
-            <span class="ws"><i class="fa-solid fa-key"></i> api</span>
+            <span class="ws active" id="btn-sys"><i class="fa-solid fa-server"></i> sys</span>
+            <span class="ws" id="btn-que"><i class="fa-solid fa-layer-group"></i> que</span>
+            <span class="ws" id="btn-api"><i class="fa-solid fa-key"></i> api</span>
         </div>
 
         <div class="window-title">
-            <i class="fa-solid fa-terminal"></i> user@arch: ~/asost_dashboard
+            <i class="fa-solid fa-terminal"></i> user@arch: ~/asost_dashboard <button class="btn-term" id="toggle-layout" style="margin-left:10px; font-size: 10px;">[ TOGGLE FLOAT ]</button>
         </div>
 
         <div class="system-modules">
-            <span class="module"><i class="fa-solid fa-memory"></i> 4.2G/16G</span>
-            <span class="module"><i class="fa-solid fa-microchip"></i> 12%</span>
+            <span class="module"><i class="fa-solid fa-memory"></i> <span id="mem-usage">4.2</span>G/16G</span>
+            <span class="module"><i class="fa-solid fa-microchip"></i> <span id="cpu-usage">12</span>%</span>
             <span class="module"><i class="fa-solid fa-stopwatch"></i> 14d 2h</span>
             <span class="module hl-green"><i class="fa-solid fa-network-wired"></i> UP</span>
             <span class="module" id="clock"><i class="fa-regular fa-clock"></i> 14:02:45</span>
@@ -116,18 +117,13 @@
                     </div>
                 </div>
 
-                <!-- API Doughnut (Right side) -->
+                <!-- API Radar (Right side) -->
                 <div class="window" style="flex: 1;">
                     <div class="window-bar">
-                        <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> ./health</span>
+                        <span class="prompt"><span class="path">~/tasks</span> <span class="cmd">❯</span> ./distribution</span>
                     </div>
                     <div class="window-content chart-container-term blur-glass" style="height: calc(100% - 25px); padding: 8px; position: relative;">
                         <canvas id="apiChart"></canvas>
-                        <!-- Overlay Text inside doughnut -->
-                        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;">
-                            <div style="color: var(--term-green-bright); font-size: 1.2em; font-weight: bold;">60%</div>
-                            <div style="color: var(--text-muted); font-size: 0.7em;">ACTIVE</div>
-                        </div>
                     </div>
                 </div>
 
@@ -167,8 +163,14 @@
             <div class="window log-window" style="flex: 2;">
                 <div class="window-bar">
                     <span class="prompt"><span class="path">~/logs</span> <span class="cmd">❯</span> tail -f system.log</span>
+                    <span class="window-controls">
+                        <button class="btn-term log-filter" data-level="ALL">ALL</button>
+                        <button class="btn-term log-filter" data-level="INFO">INFO</button>
+                        <button class="btn-term log-filter" data-level="WARN">WARN</button>
+                        <button class="btn-term log-filter" data-level="ERR">ERR</button>
+                    </span>
                 </div>
-                <div class="window-content terminal-body-term blur-glass" id="terminal-output" style="font-size: 0.9em;">
+                <div class="window-content terminal-body-term blur-glass" id="terminal-output" style="font-size: 0.9em; overflow-y: auto;">
                     <!-- Logs injected via JS -->
                 </div>
             </div>
@@ -176,6 +178,43 @@
         </div>
 
     </main>
+
+    <!-- Modals -->
+    <!-- File Queue Modal -->
+    <div class="modal-overlay" id="queue-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span><i class="fa-solid fa-layer-group"></i> ~/jobs/queue</span>
+                <span class="modal-close"><i class="fa-solid fa-xmark"></i></span>
+            </div>
+            <div class="modal-body">
+                <table class="term-table" id="queue-table">
+                    <thead><tr><th>ID</th><th>FILENAME</th><th>SIZE</th><th>STATUS</th><th>ACTION</th></tr></thead>
+                    <tbody>
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- API Keys Modal -->
+    <div class="modal-overlay" id="api-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span><i class="fa-solid fa-key"></i> ~/config/api_keys</span>
+                <span class="modal-close"><i class="fa-solid fa-xmark"></i></span>
+            </div>
+            <div class="modal-body">
+                <table class="term-table" id="api-table">
+                    <thead><tr><th>KEY_ALIAS</th><th>LIMITS (RPM/TPM)</th><th>STATUS</th><th>ACTION</th></tr></thead>
+                    <tbody>
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
 
     <script src="script.js"></script>
 </body>

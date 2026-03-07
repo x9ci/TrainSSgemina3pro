@@ -13,29 +13,43 @@ const borderMuted = 'rgba(70, 102, 0, 0.3)';
 
 const ctxThroughput = document.getElementById('throughputChart').getContext('2d');
 
+// Initialize empty arrays for waterfall/heatmap style chart
+const maxDataPoints = 20;
+const labels = Array.from({length: maxDataPoints}, (_, i) => i.toString());
+const tpmData = Array.from({length: maxDataPoints}, () => Math.floor(Math.random() * 5000));
+
 const throughputData = {
-    labels: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'],
+    labels: labels,
     datasets: [{
-        label: 'PG_PROC',
-        data: [1200, 1900, 1500, 2200, 1800, 2500, 3100],
+        label: 'TPM_USAGE',
+        data: tpmData,
+        backgroundColor: function(context) {
+            const chart = context.chart;
+            const {ctx, chartArea} = chart;
+            if (!chartArea) return null;
+            // Create a gradient to look like a heatmap/waterfall
+            const gradient = ctx.createLinearGradient(0, chartArea.bottom, 0, chartArea.top);
+            gradient.addColorStop(0, 'rgba(70, 102, 0, 0.2)'); // Safe
+            gradient.addColorStop(0.7, 'rgba(215, 153, 33, 0.5)'); // Warning
+            gradient.addColorStop(1, 'rgba(204, 36, 29, 0.8)'); // Danger
+            return gradient;
+        },
         borderColor: termGreenBright,
-        backgroundColor: 'transparent',
-        borderWidth: 1, // Thin terminal lines
-        pointBackgroundColor: bgWindow,
-        pointBorderColor: termGreenBright,
-        pointBorderWidth: 1,
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        fill: false,
-        tension: 0.0 // Sharp angles, no curves
+        borderWidth: 1,
+        fill: true,
+        tension: 0.1,
+        pointRadius: 0 // Hide points for waterfall look
     }]
 };
 
 const throughputConfig = {
-    type: 'line',
+    type: 'line', // Line with fill acts like a solid area/waterfall chart
     data: throughputData,
     options: {
         responsive: true,
+        animation: {
+            duration: 0 // Disable initial animation for snappier real-time feel
+        },
         maintainAspectRatio: false,
         plugins: {
             legend: { display: false },
@@ -60,6 +74,7 @@ const throughputConfig = {
         scales: {
             y: {
                 beginAtZero: true,
+                max: 30000, // TPM Max Limit
                 grid: {
                     color: borderMuted,
                     drawBorder: false,
@@ -67,47 +82,67 @@ const throughputConfig = {
                 ticks: { padding: 8, color: termGreen }
             },
             x: {
-                grid: {
-                    color: borderMuted,
-                    drawBorder: false,
-                    tickLength: 4
-                },
-                ticks: { padding: 8, color: termGreen }
+                display: false // Hide X axis for continuous flow
             }
         },
         interaction: { intersect: false, mode: 'index' },
     }
 };
 
-new Chart(ctxThroughput, throughputConfig);
+const liveThroughputChart = new Chart(ctxThroughput, throughputConfig);
+
+// Simulate real-time waterfall data
+setInterval(() => {
+    let lastVal = liveThroughputChart.data.datasets[0].data[liveThroughputChart.data.datasets[0].data.length - 1];
+    let newVal = lastVal + (Math.random() * 4000 - 2000); // Random walk
+    if (newVal < 0) newVal = 0;
+    if (newVal > 30000) {
+        newVal = 30000;
+        triggerRedAlert(); // Trigger visual warning if TPM maxes out
+    }
+
+    liveThroughputChart.data.datasets[0].data.shift();
+    liveThroughputChart.data.datasets[0].data.push(newVal);
+    liveThroughputChart.update('none'); // Update without animation
+}, 1000);
 
 
-// 1b. API Key Doughnut Chart
+// 1b. Radar Chart (Task Distribution) replacing Doughnut
 const ctxApi = document.getElementById('apiChart');
 let apiChartInstance = null;
 if (ctxApi) {
     const apiData = {
-        labels: ['ACTIVE', 'COOLING', 'EXHAUSTED'],
+        labels: ['PDF_PROC', 'DOCX_PROC', 'TXT_PROC', 'OCR_WAIT', 'API_ERR', 'DB_SYNC'],
         datasets: [{
-            data: [60, 30, 10],
-            backgroundColor: [
-                termGreenBright, // Active
-                '#d3869b',       // Cooling (purple/pinkish)
-                '#fb4934'        // Exhausted (red/orange)
-            ],
-            borderColor: bgWindow,
-            borderWidth: 2,
-            hoverOffset: 4
+            label: 'Task Distribution',
+            data: [65, 59, 20, 11, 5, 40],
+            backgroundColor: 'rgba(70, 102, 0, 0.2)', // Transparent green
+            borderColor: termGreenBright,
+            pointBackgroundColor: termGreenBright,
+            pointBorderColor: '#fff',
+            pointHoverBackgroundColor: '#fff',
+            pointHoverBorderColor: termGreenBright,
+            borderWidth: 1
         }]
     };
 
     apiChartInstance = new Chart(ctxApi.getContext('2d'), {
-        type: 'doughnut',
+        type: 'radar',
         data: apiData,
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            cutout: '75%', // Make it thin
+            scales: {
+                r: {
+                    angleLines: { color: borderMuted },
+                    grid: { color: borderMuted },
+                    pointLabels: {
+                        color: termGreenBright,
+                        font: { family: "'ThedusCondensedLight-Regular', monospace", size: 10 }
+                    },
+                    ticks: { display: false } // Hide numbers on radar lines
+                }
+            },
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -117,12 +152,25 @@ if (ctxApi) {
                     borderColor: termGreen,
                     borderWidth: 1,
                     cornerRadius: 0,
-                    bodyFont: { family: "'JetBrains Mono', monospace", size: 12 },
+                    bodyFont: { family: "'ThedusCondensedLight-Regular', monospace", size: 12 },
                 }
             }
         }
     });
+
+    // Simulate Radar data changes
+    setInterval(() => {
+        apiChartInstance.data.datasets[0].data = apiChartInstance.data.datasets[0].data.map(v => {
+            let n = v + (Math.random() * 10 - 5);
+            return n < 0 ? 0 : (n > 100 ? 100 : n);
+        });
+        apiChartInstance.update();
+    }, 2500);
 }
+
+// ==========================================
+// CORE ASOST FRONTEND API (FOR REAL DATA)
+// ==========================================
 
 // ==========================================
 // CORE ASOST FRONTEND API (FOR REAL DATA)
@@ -130,6 +178,8 @@ if (ctxApi) {
 
 // 2. Terminal Log Output
 const terminalBody = document.getElementById('terminal-output');
+
+let currentLogLevel = 'ALL';
 
 function getTimestamp() {
     const now = new Date();
@@ -141,23 +191,53 @@ function getTimestamp() {
  * @param {string} msg - The log message (can include HTML for syntax highlighting).
  * @param {string} type - 'info', 'sys', 'warn', 'err'
  */
-function asostAddLog(msg, type = 'info') {
+function asostAddLog(msg, type = 'INFO') {
     if (!terminalBody) return;
     const logEl = document.createElement('div');
+    logEl.dataset.level = type.toUpperCase();
 
     let colorClass = 'log-info';
     let prefix = '';
 
-    if (type === 'sys')  { colorClass = 'log-sys'; }
-    if (type === 'warn') { colorClass = 'log-warn'; prefix = 'WARN: '; }
-    if (type === 'err')  { colorClass = 'log-err'; prefix = 'ERR: '; }
+    const upperType = type.toUpperCase();
+    if (upperType === 'SYS')  { colorClass = 'log-sys'; }
+    if (upperType === 'WARN') { colorClass = 'log-warn'; prefix = 'WARN: '; }
+    if (upperType === 'ERR')  { colorClass = 'log-err'; prefix = 'ERR: '; }
 
     logEl.innerHTML = `<span class="log-time">${getTimestamp()}</span> <span class="${colorClass}">${prefix}${msg}</span>`;
+
+    // Apply initial filter visibility
+    if (currentLogLevel !== 'ALL' && upperType !== currentLogLevel) {
+        logEl.style.display = 'none';
+    }
+
     terminalBody.appendChild(logEl);
 
-    // Auto-scroll to bottom
-    terminalBody.scrollTop = terminalBody.scrollHeight;
+    // Auto-scroll to bottom if near bottom
+    if (terminalBody.scrollHeight - terminalBody.scrollTop - terminalBody.clientHeight < 50) {
+        terminalBody.scrollTop = terminalBody.scrollHeight;
+    }
 }
+
+// Log Filtering Logic
+document.querySelectorAll('.log-filter').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        // Reset actives
+        document.querySelectorAll('.log-filter').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+
+        currentLogLevel = e.target.dataset.level;
+
+        const logs = terminalBody.children;
+        for (let log of logs) {
+            if (currentLogLevel === 'ALL' || log.dataset.level === currentLogLevel) {
+                log.style.display = 'block';
+            } else {
+                log.style.display = 'none';
+            }
+        }
+    });
+});
 
 // 3. Live ASCII Progress Bars (htop style)
 const jobsBody = document.getElementById('jobs-output');
@@ -225,12 +305,20 @@ function simulateBackend() {
         const op = operations[Math.floor(Math.random() * operations.length)];
         const file = files[Math.floor(Math.random() * files.length)];
 
-        const isWarn = Math.random() > 0.9;
-        const statusText = isWarn ? 'DELAY' : 'OK';
-        const statusClass = isWarn ? 'number' : 'log-sys';
+        const r = Math.random();
+        let logType = 'INFO';
+        let statusText = 'OK';
+        let statusClass = 'log-sys';
+
+        if (r > 0.95) {
+            logType = 'ERR'; statusText = 'FAILED'; statusClass = 'log-err';
+        } else if (r > 0.85) {
+            logType = 'WARN'; statusText = 'DELAY'; statusClass = 'number';
+        }
+
         const formattedMsg = `<span class="keyword">${op}</span> <span class="punct">-></span> <span class="string">"${file}"</span> <span class="punct">[</span><span class="${statusClass}">${statusText}</span><span class="punct">]</span>`;
 
-        asostAddLog(formattedMsg, isWarn ? 'warn' : 'info');
+        asostAddLog(formattedMsg, logType);
     }
 
     // 2. Live Progress
@@ -268,7 +356,160 @@ setTimeout(simulateBackend, 3000);
 
 
 
-// 3. ASCII Upload Zone Interactivity
+// 4. Modals and Layout Toggles
+let isAlertActive = false;
+function triggerRedAlert() {
+    if (isAlertActive) return;
+    isAlertActive = true;
+    document.body.classList.add('red-alert-mode');
+    asostAddLog('CRITICAL: TPM LIMIT EXCEEDED - ENFORCING COOLDOWN', 'ERR');
+    setTimeout(() => {
+        document.body.classList.remove('red-alert-mode');
+        asostAddLog('TPM returning to nominal limits...', 'SYS');
+        isAlertActive = false;
+    }, 3000);
+}
+
+const toggleLayoutBtn = document.getElementById('toggle-layout');
+const mainLayout = document.querySelector('.tiling-layout');
+
+toggleLayoutBtn.addEventListener('click', () => {
+    document.body.classList.toggle('floating-mode');
+
+    // If we turned ON floating mode, initialize interact.js
+    if (document.body.classList.contains('floating-mode')) {
+        // Simple random scatter for initial float positions
+        document.querySelectorAll('.window').forEach(win => {
+            const x = Math.random() * (window.innerWidth - 400);
+            const y = Math.random() * (window.innerHeight - 300);
+            win.style.transform = `translate(${x}px, ${y}px)`;
+            win.style.width = '400px';
+            win.style.height = '300px';
+            win.setAttribute('data-x', x);
+            win.setAttribute('data-y', y);
+        });
+
+        interact('.window')
+            .draggable({
+                allowFrom: '.window-bar',
+                listeners: {
+                    move(event) {
+                        const target = event.target;
+                        const x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
+                        const y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
+                        target.style.transform = `translate(${x}px, ${y}px)`;
+                        target.setAttribute('data-x', x);
+                        target.setAttribute('data-y', y);
+                    }
+                }
+            })
+            .resizable({
+                edges: { left: false, right: true, bottom: true, top: false },
+                listeners: {
+                    move(event) {
+                        const target = event.target;
+                        let x = (parseFloat(target.getAttribute('data-x')) || 0);
+                        let y = (parseFloat(target.getAttribute('data-y')) || 0);
+
+                        Object.assign(target.style, {
+                            width: `${event.rect.width}px`,
+                            height: `${event.rect.height}px`,
+                            transform: `translate(${x}px, ${y}px)`
+                        });
+                    }
+                }
+            });
+    } else {
+        // Turned off floating mode, clean up interact.js and styles
+        interact('.window').unset();
+        document.querySelectorAll('.window').forEach(win => {
+            win.style.transform = '';
+            win.style.width = '';
+            win.style.height = '';
+            win.style.position = '';
+            win.removeAttribute('data-x');
+            win.removeAttribute('data-y');
+        });
+    }
+});
+
+// Modals logic
+const queueModal = document.getElementById('queue-modal');
+const apiModal = document.getElementById('api-modal');
+
+document.getElementById('btn-que').addEventListener('click', () => {
+    queueModal.style.display = 'flex';
+    populateQueueTable();
+});
+
+document.getElementById('btn-api').addEventListener('click', () => {
+    apiModal.style.display = 'flex';
+    populateApiTable();
+});
+
+document.querySelectorAll('.modal-close').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.target.closest('.modal-overlay').style.display = 'none';
+    });
+});
+
+// Click outside to close
+window.addEventListener('click', (e) => {
+    if (e.target === queueModal) queueModal.style.display = 'none';
+    if (e.target === apiModal) apiModal.style.display = 'none';
+});
+
+// Dummy Table Data Generators
+function populateQueueTable() {
+    const tbody = document.querySelector('#queue-table tbody');
+    tbody.innerHTML = '';
+    const mockFiles = [
+        {id: 'J01', name: 'Neuro_Ch1.pdf', size: '2.4M', status: 'PROCESSING'},
+        {id: 'J02', name: 'Quantum.docx', size: '8.1M', status: 'QUEUED'},
+        {id: 'J03', name: 'Notes_2023.txt', size: '12K', status: 'PAUSED'}
+    ];
+
+    mockFiles.forEach(f => {
+        const row = document.createElement('tr');
+        const statClass = f.status === 'PROCESSING' ? 'log-info' : (f.status === 'PAUSED' ? 'number' : 'comment');
+        row.innerHTML = `
+            <td>${f.id}</td>
+            <td class="string">${f.name}</td>
+            <td>${f.size}</td>
+            <td class="${statClass}">${f.status}</td>
+            <td><button class="btn-term">${f.status === 'PAUSED' ? 'RESUME' : 'PAUSE'}</button></td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function populateApiTable() {
+    const tbody = document.querySelector('#api-table tbody');
+    tbody.innerHTML = '';
+    const mockKeys = [
+        {alias: 'GEMINI_MAIN', limits: '2 / 30000', status: 'ACTIVE'},
+        {alias: 'GEMINI_BACKUP', limits: '2 / 30000', status: 'COOLING'},
+        {alias: 'GEMINI_FREE', limits: '2 / 30000', status: 'EXHAUSTED'}
+    ];
+
+    mockKeys.forEach(k => {
+        const row = document.createElement('tr');
+        let statColor = 'ok';
+        if(k.status === 'COOLING') statColor = 'warn';
+        if(k.status === 'EXHAUSTED') statColor = 'log-err';
+
+        row.innerHTML = `
+            <td class="keyword">${k.alias}</td>
+            <td>${k.limits}</td>
+            <td class="${statColor}">${k.status}</td>
+            <td><button class="btn-term">TOGGLE</button></td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+
+// 5. ASCII Upload Zone Interactivity
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const borderBox = dropZone.querySelector('.border-box');
@@ -328,11 +569,28 @@ function handleFileTermMock(fileName) {
     }, 3000);
 }
 
-// Simple clock update for Polybar
+// Simple clock and resource gauge updates for Polybar
 setInterval(() => {
     const clock = document.getElementById('clock');
     const now = new Date();
     clock.innerText = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+    // Update RAM
+    const memEl = document.getElementById('mem-usage');
+    let currentMem = parseFloat(memEl.innerText);
+    currentMem += (Math.random() * 0.4) - 0.2;
+    if (currentMem < 2.0) currentMem = 2.0;
+    if (currentMem > 15.0) currentMem = 15.0;
+    memEl.innerText = currentMem.toFixed(1);
+
+    // Update CPU
+    const cpuEl = document.getElementById('cpu-usage');
+    let currentCpu = parseInt(cpuEl.innerText);
+    currentCpu += Math.floor((Math.random() * 10) - 5);
+    if (currentCpu < 1) currentCpu = 1;
+    if (currentCpu > 99) currentCpu = 99;
+    cpuEl.innerText = currentCpu;
+
 }, 1000);
 
 // --- Matrix Rain Background Effect ---
