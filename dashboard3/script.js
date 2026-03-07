@@ -5,9 +5,12 @@
 'use strict';
 
 // ── Chart.js defaults ───────────────────────────────────────────
-Chart.defaults.color       = '#7c6f64';
-Chart.defaults.font.family = "'JetBrains Mono', monospace";
-Chart.defaults.font.size   = 10;
+if (typeof Chart !== 'undefined' && Chart.defaults) {
+    if (!Chart.defaults.font) Chart.defaults.font = {};
+    Chart.defaults.color       = '#7c6f64';
+    Chart.defaults.font.family = "'JetBrains Mono', monospace";
+    Chart.defaults.font.size   = 10;
+}
 
 const C = {
     green:   '#8ab800',
@@ -70,7 +73,7 @@ document.querySelectorAll('.ctrl-max').forEach(btn => {
         const el = document.getElementById(btn.dataset.win);
         if (!el) return;
         el.classList.toggle('maximized');
-        setTimeout(() => { Object.values(Chart.instances).forEach(c => c.resize()); }, 60);
+        setTimeout(() => { if (typeof Chart !== 'undefined' && Chart.instances) Object.values(Chart.instances).forEach(c => c.resize()); }, 60);
     });
 });
 document.addEventListener('keydown', e => {
@@ -135,7 +138,7 @@ for (let i = 19; i >= 0; i--) {
     tpmC.push(Math.floor(8000  + Math.random() * 42000));
 }
 
-const tpmChart = new Chart(document.getElementById('tpmChart'), {
+const tpmChart = typeof Chart !== 'undefined' ? new Chart(document.getElementById('tpmChart'), {
     type: 'line',
     data: {
         labels: tpmLabels,
@@ -161,8 +164,9 @@ const tpmChart = new Chart(document.getElementById('tpmChart'), {
         },
         interaction:{intersect:false, mode:'index'},
     },
-});
+}) : null;
 
+if (typeof Chart !== 'undefined') {
 Chart.register({
     id:'dangerLine',
     afterDraw(chart) {
@@ -175,6 +179,7 @@ Chart.register({
         ctx.restore();
     }
 });
+}
 
 setInterval(() => {
     const t = new Date();
@@ -190,7 +195,7 @@ setInterval(() => {
         if (arr.at(-1) > 58000) asostAddLog(`<span class="keyword">${nm}</span> nearing TPM limit: <span class="number">${arr.at(-1).toLocaleString()}</span>/60K`, 'warn');
     });
 
-    tpmChart.update('none');
+    if (tpmChart) tpmChart.update('none');
     updateApiStats();
     // Also update topo edge weights
     topoEdgeLoad[0] = tpmA.at(-1) / 60000;
@@ -201,7 +206,7 @@ setInterval(() => {
 // ================================================================
 //  6. RADAR CHART
 // ================================================================
-new Chart(document.getElementById('radarChart'), {
+const radarChart = typeof Chart !== 'undefined' ? new Chart(document.getElementById('radarChart'), {
     type:'radar',
     data:{
         labels:['PDF','DOCX','TXT','SUCCESS','SPEED','ERRORS'],
@@ -222,19 +227,31 @@ new Chart(document.getElementById('radarChart'), {
             ticks:{display:false},
         }},
     },
-});
+}) : null;
+
+setInterval(() => {
+    if (!radarChart) return;
+    const data = radarChart.data.datasets[0].data;
+    data[0] = Math.max(70, Math.min(95, data[0] + (Math.random() - 0.5) * 5)); // PDF
+    data[1] = Math.max(40, Math.min(80, data[1] + (Math.random() - 0.5) * 5)); // DOCX
+    data[2] = Math.max(10, Math.min(40, data[2] + (Math.random() - 0.5) * 5)); // TXT
+    data[3] = Math.max(90, Math.min(100, data[3] + (Math.random() - 0.5) * 2)); // SUCCESS
+    data[4] = Math.max(60, Math.min(90, data[4] + (Math.random() - 0.5) * 4)); // SPEED
+    data[5] = Math.max(5, Math.min(25, data[5] + (Math.random() - 0.5) * 3));  // ERRORS
+    radarChart.update('none');
+}, 2000);
 
 // ================================================================
 //  7. API DOUGHNUT (hidden — data only for modal counts)
 // ================================================================
-const apiDoughnut = new Chart(document.getElementById('apiChart'), {
+const apiDoughnut = typeof Chart !== 'undefined' ? new Chart(document.getElementById('apiChart'), {
     type:'doughnut',
     data:{
         labels:['ACTIVE','COOLING','EXHAUSTED'],
         datasets:[{ data:[3,1,1], backgroundColor:[C.green,C.purple,C.red], borderWidth:0 }],
     },
     options:{ responsive:false, plugins:{legend:{display:false}} },
-});
+}) : null;
 
 // ================================================================
 //  8. API KEYS DATA
@@ -251,8 +268,10 @@ function updateApiStats() {
     const active    = apiKeys.filter(k => k.status==='ACTIVE' && !k.disabled).length;
     const cooling   = apiKeys.filter(k => k.status==='COOLING').length;
     const exhausted = apiKeys.filter(k => k.status==='EXHAUSTED').length;
-    apiDoughnut.data.datasets[0].data = [active, cooling, exhausted];
-    apiDoughnut.update('none');
+    if (apiDoughnut) {
+        apiDoughnut.data.datasets[0].data = [active, cooling, exhausted];
+        apiDoughnut.update('none');
+    }
     if (document.getElementById('api-modal').classList.contains('open')) renderApiTable();
 }
 
@@ -493,7 +512,7 @@ function spawnGanttJob() {
     const w = Math.floor(Math.random()*WORKERS);
     addGanttJob(w, FILES_G[Math.floor(Math.random()*FILES_G.length)], 3000+Math.random()*11000);
     workerJobs.forEach((jobs,i) => { workerJobs[i]=jobs.filter(j=>j.end>Date.now()-GANTT_W*1.5); });
-    setTimeout(spawnGanttJob, 1200+Math.random()*2400);
+    setTimeout(spawnGanttJob, 400+Math.random()*1000); // more dense
 }
 setTimeout(spawnGanttJob, 800);
 
@@ -778,17 +797,17 @@ function spawnTopoParticles() {
         worX+(engX-worX)*0.5, engY, pcol);
 
     // Engine → DB or Queue
-    if (Math.random() > 0.45) spawnParticle(engX+18,engY, dbX-12,dbY, engX+60,engY, dbX-60,dbY, C.green);
-    if (Math.random() > 0.55) spawnParticle(engX+18,engY, queX-12,queY, engX+60,engY, queX-60,queY, C.blue);
+    if (Math.random() > 0.15) spawnParticle(engX+18,engY, dbX-12,dbY, engX+60,engY, dbX-60,dbY, C.green);
+    if (Math.random() > 0.25) spawnParticle(engX+18,engY, queX-12,queY, engX+60,engY, queX-60,queY, C.blue);
 
     // DB → API
-    if (Math.random() > 0.35) spawnParticle(dbX+14,dbY, apiX-20,apiY, dbX+60,dbY, apiX-60,apiY, C.orange);
+    if (Math.random() > 0.15) spawnParticle(dbX+14,dbY, apiX-20,apiY, dbX+60,dbY, apiX-60,apiY, C.orange);
     // Queue → API
-    if (Math.random() > 0.5) spawnParticle(queX+14,queY, apiX-20,apiY, queX+60,queY, apiX-60,apiY, C.blue);
+    if (Math.random() > 0.2) spawnParticle(queX+14,queY, apiX-20,apiY, queX+60,queY, apiX-60,apiY, C.blue);
     // API → Output
-    if (Math.random() > 0.4) spawnParticle(apiX+20,apiY, outX-16,outY, apiX+60,apiY, outX-60,outY, C.green);
+    if (Math.random() > 0.1) spawnParticle(apiX+20,apiY, outX-16,outY, apiX+60,apiY, outX-60,outY, C.green);
 
-    setTimeout(spawnTopoParticles, 250+Math.random()*550);
+    setTimeout(spawnTopoParticles, 80+Math.random()*200); // significantly faster topology animation
 }
 setTimeout(spawnTopoParticles, 600);
 
@@ -912,17 +931,17 @@ function startPipeline(filename) {
                 clearInterval(pipelineTimer);
                 setPipelineStage(5, 0, '');
                 asostAddLog(`<span class="keyword">pipeline_done</span>: <span class="string">"${pipelineFile}"</span> — all stages complete`, 'sys');
-                setTimeout(resetPipeline, 4000);
+                setTimeout(resetPipeline, 800); // Much faster reset
             }
         }
-    }, 180);
+    }, 90); // 2x faster pipeline updates
 }
 
 // Auto-start pipeline with the first running file
 setTimeout(() => {
     const first = fileQueue.find(f => f.status === 'RUNNING');
     if (first) startPipeline(first.name);
-}, 2500);
+}, 500);
 
 // Auto-refill queue when empty to keep dashboard busy
 const DEMO_FILES = [
@@ -949,10 +968,10 @@ setInterval(autoRefillQueue, 8000);
 function checkPipelineNeeded() {
     if (!pipelineActive) {
         const running = fileQueue.find(f => f.status === 'RUNNING');
-        if (running) setTimeout(() => startPipeline(running.name), 800);
+        if (running) setTimeout(() => startPipeline(running.name), 300);
     }
 }
-setInterval(checkPipelineNeeded, 6000);
+setInterval(checkPipelineNeeded, 1200);
 
 // ================================================================
 //  13. UPLOAD ZONE
@@ -1022,6 +1041,20 @@ animateGauges();
 const OPS  = ['extract_pdf','chunk_text','gemini_req','save_db','vectorize','index_doc','cleanup_tmp','requeue','flush_cache','rotate_key'];
 const FLOG = ['Neuro_Ch1.pdf','Quantum.docx','BladeRunner.pdf','AI_Ethics.pdf','DataSci.docx','Mech_Eng.pdf','Sociology.docx','Calculus_V2.pdf','Philosophy.pdf','LingTheory.docx'];
 const CHUNKS_MSG = ['chunk 12/48','chunk 31/48','chunk 48/48 ✓','chunks merged','delta applied'];
+
+// PRE-FILL LOGS
+function preFillLogs() {
+    for (let i = 0; i < 40; i++) {
+        const op = OPS[Math.floor(Math.random()*OPS.length)];
+        const f  = FLOG[Math.floor(Math.random()*FLOG.length)];
+        const r = Math.random();
+        let status = '<span class="log-sys">OK</span>';
+        if (r > 0.9) status = '<span class="log-warn">DELAY</span>';
+        const msg = `<span class="keyword">${op}</span> <span class="punct">→</span> <span class="string">"${f}"</span> <span class="punct">[</span>${status}<span class="punct">]</span>`;
+        asostAddLog(msg, r > 0.9 ? 'warn' : 'info');
+    }
+}
+preFillLogs();
 
 // Live counters
 let liveBooks = 1204, livePages = 452000, liveThreads = 12;
@@ -1124,7 +1157,7 @@ function initMatrix() {
 }
 window.addEventListener('resize', () => {
     initMatrix();
-    Object.values(Chart.instances).forEach(c=>c.resize());
+    if (typeof Chart !== 'undefined' && Chart.instances) Object.values(Chart.instances).forEach(c=>c.resize());
 });
 initMatrix();
 function drawMatrix() {
