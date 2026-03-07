@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>user@arch: ~/asost</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100;0,300;0,400;0,700;1,300&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <canvas id="matrix-bg"></canvas>
+    <div class="crt-overlay"></div>
+    <div class="vignette"></div>
+
+    <!-- Hidden data canvases -->
+    <canvas id="apiChart" style="display:none;width:1px;height:1px;"></canvas>
+
+    <!-- POLYBAR -->
+    <header class="polybar">
+        <div class="workspaces">
+            <span class="ws active"><i class="fa-solid fa-server"></i> sys</span>
+            <span class="ws" id="open-queue-ws"><i class="fa-solid fa-layer-group"></i> que</span>
+            <span class="ws" id="open-api-ws"><i class="fa-solid fa-key"></i> api</span>
+            <span class="ws sound-toggle" id="sound-toggle" title="Toggle sound">
+                <i class="fa-solid fa-volume-xmark" id="sound-icon"></i> sfx
+            </span>
+        </div>
+        <div class="window-title">
+            <i class="fa-solid fa-terminal"></i>&nbsp;user@arch:&nbsp;<span class="path">~/asost_dashboard</span>
+        </div>
+        <div class="system-modules">
+            <span class="module polybar-stat"><i class="fa-solid fa-book"></i> <span id="stat-books">1204</span> books</span>
+            <span class="module polybar-stat"><i class="fa-solid fa-file-lines"></i> <span id="stat-pages">452K</span> pgs</span>
+            <span class="module"><i class="fa-solid fa-memory"></i> <span id="ram-display">4.2G/16G</span></span>
+            <span class="module"><i class="fa-solid fa-microchip"></i> <span id="cpu-display">12%</span></span>
+            <span class="module hl-green"><i class="fa-solid fa-network-wired"></i> UP</span>
+            <span class="module" id="clock"></span>
+        </div>
+    </header>
+
+    <main class="tiling-layout">
+
+        <!-- ═══ LEFT COL ═══ -->
+        <div class="tile-col left-col">
+
+            <div class="window active-window" id="win-neofetch">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/system</span> <span class="cmd">❯</span> neofetch --asost</span>
+                    <span class="window-controls">
+                        <i class="fa-solid fa-circle" style="color:var(--term-red);font-size:8px"></i>
+                        <i class="fa-solid fa-circle ctrl-max" data-win="win-neofetch" style="color:var(--term-orange);font-size:8px"></i>
+                    </span>
+                </div>
+                <div class="window-content blur-glass">
+                    <div class="ascii-art glow-text cyberpunk-glitch">
+           _____  ____   _____ _______
+    /\    / ____|/ __ \ / ____|__   __|
+   /  \  | (___ | |  | | (___    | |
+  / /\ \  \___ \| |  | |\___ \   | |
+ / ____ \ ____) | |__| |____) |  | |
+/_/    \_\_____/ \____/|_____/   |_|
+                    </div>
+                    <div class="quote-block">
+                        <div class="quote-text">"Translation is not a matter of words only: it is a matter of making intelligible a whole culture."</div>
+                        <div class="quote-author">— Anthony Burgess</div>
+                    </div>
+                    <div class="stats-grid-term">
+                        <div class="stat-line"><span class="keyword">Engine:</span><span class="string">ASOST Core v2.4</span></div>
+                        <div class="stat-line"><span class="keyword">Model :</span><span class="string">Gemini-2.5-Pro</span></div>
+                        <div class="stat-line"><span class="keyword">Status:</span><span id="sys-status" class="log-sys">OPERATIONAL</span></div>
+                        <div class="stat-line"><span class="keyword">Uptime:</span><span class="number">14d 2h 31m</span></div>
+                        <div class="stat-line"><span class="keyword">Speed :</span><span class="number">420 pg/hr</span></div>
+                        <div class="stat-line"><span class="keyword">Rate  :</span><span style="color:var(--term-green-bright)">98.7% success</span></div>
+                    </div>
+                    <div class="gauge-section">
+                        <div class="gauge-item">
+                            <span class="comment">CPU</span>
+                            <div class="gauge-bar-wrap"><div class="gauge-bar" id="cpu-bar"></div></div>
+                            <span class="number" id="cpu-pct">12%</span>
+                        </div>
+                        <div class="gauge-item">
+                            <span class="comment">RAM</span>
+                            <div class="gauge-bar-wrap"><div class="gauge-bar ram" id="ram-bar"></div></div>
+                            <span class="number" id="ram-pct">26%</span>
+                        </div>
+                        <div class="gauge-item">
+                            <span class="comment">DSK</span>
+                            <div class="gauge-bar-wrap"><div class="gauge-bar disk" id="disk-bar"></div></div>
+                            <span class="number" id="disk-pct">61%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="window" id="win-upload">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/upload</span> <span class="cmd">❯</span> ./dropzone <span class="comment">--watch</span></span>
+                    <span class="window-controls">
+                        <i class="fa-solid fa-circle" style="color:var(--term-red);font-size:8px"></i>
+                        <i class="fa-solid fa-circle ctrl-max" data-win="win-upload" style="color:var(--term-orange);font-size:8px"></i>
+                    </span>
+                </div>
+                <div class="window-content upload-zone-term blur-glass" id="drop-zone">
+                    <div class="border-box" id="dropzone-inner">
+                        <p class="center-text comment">/* DROP PDF/DOCX FILES HERE */</p>
+                        <p class="center-text glow-text"><i class="fa-solid fa-file-import fa-2x"></i></p>
+                        <p class="center-text string">[ CLICK TO BROWSE ]</p>
+                        <input type="file" id="file-input" hidden accept=".pdf,.docx">
+                    </div>
+                    <div class="queue-preview">
+                        <div class="queue-preview-header">
+                            <span class="comment">/* ACTIVE QUEUE */</span>
+                            <button class="term-btn-sm" id="open-queue-btn"><i class="fa-solid fa-external-link-alt"></i> MANAGE</button>
+                        </div>
+                        <div id="queue-mini-list"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ MOSS AMBIENT PANEL ═══ -->
+            <div class="window moss-window" id="win-moss">
+                <div class="moss-frame">
+                    <img src="moss.gif" alt="ambient" class="moss-gif" draggable="false">
+                    <!-- Scanline overlay on the gif -->
+                    <div class="moss-scan"></div>
+                    <!-- Terminal overlay text -->
+                    <div class="moss-overlay-text">
+                        <div class="moss-line"><span class="keyword">env</span> <span class="comment">// ORGANIC_CORE</span></div>
+                        <div class="moss-line"><span class="string">substrate</span><span class="punct">:</span> <span class="number">active</span></div>
+                        <div class="moss-line moss-blink"><span class="log-sys">█ LIVING</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ═══ CENTER COL ═══ -->
+        <div class="tile-col center-col">
+
+            <!-- TOP ROW: TPM + Radar -->
+            <div class="tile-row" style="height:215px;flex-shrink:0;">
+                <div class="window" style="flex:2.2;" id="win-tpm">
+                    <div class="window-bar">
+                        <span class="prompt"><span class="path">~/tpm</span> <span class="cmd">❯</span> plot --keys=3 --live --limit=60K</span>
+                        <span class="window-controls">
+                            <span class="key-legend">
+                                <span class="leg-item" style="color:var(--term-green-bright)">■ KEY-A</span>
+                                <span class="leg-item" style="color:var(--term-blue)">■ KEY-B</span>
+                                <span class="leg-item" style="color:var(--term-orange)">■ KEY-C</span>
+                            </span>
+                            <i class="fa-solid fa-circle ctrl-max" data-win="win-tpm" style="color:var(--term-orange);font-size:8px"></i>
+                        </span>
+                    </div>
+                    <div class="window-content chart-container-term blur-glass" style="height:calc(100% - 28px);padding:6px;position:relative;">
+                        <canvas id="tpmChart"></canvas>
+                        <div class="tpm-limit-label">── 60K LIMIT</div>
+                    </div>
+                </div>
+                <div class="window" style="flex:1;" id="win-radar">
+                    <div class="window-bar">
+                        <span class="prompt"><span class="path">~/dist</span> <span class="cmd">❯</span> radar</span>
+                        <i class="fa-solid fa-circle ctrl-max" data-win="win-radar" style="color:var(--term-orange);font-size:8px"></i>
+                    </div>
+                    <div class="window-content chart-container-term blur-glass" style="height:calc(100% - 28px);padding:4px;">
+                        <canvas id="radarChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GANTT -->
+            <div class="window" style="height:148px;flex-shrink:0;" id="win-gantt">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/workers</span> <span class="cmd">❯</span> gantt --threads=6 --live</span>
+                    <span class="comment" style="font-size:9px;margin-right:6px;">PARALLEL CHUNK PROCESSING</span>
+                    <i class="fa-solid fa-circle ctrl-max" data-win="win-gantt" style="color:var(--term-orange);font-size:8px"></i>
+                </div>
+                <div class="window-content blur-glass" style="padding:0;overflow:hidden;">
+                    <canvas id="ganttCanvas"></canvas>
+                </div>
+            </div>
+
+            <!-- ═══ NODE TOPOLOGY — full remaining space ═══ -->
+            <div class="window" style="flex-grow:1;min-height:0;" id="win-topo">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/topology</span> <span class="cmd">❯</span> netstat --graph --live</span>
+                    <div class="topo-legend">
+                        <span class="topo-leg"><span class="topo-dot" style="background:var(--term-green-bright)"></span>ACTIVE</span>
+                        <span class="topo-leg"><span class="topo-dot" style="background:var(--term-orange)"></span>BUSY</span>
+                        <span class="topo-leg"><span class="topo-dot" style="background:var(--term-red)"></span>DOWN</span>
+                        <span class="topo-leg" style="color:var(--term-green-bright);font-size:9px;">──&nbsp;DATA</span>
+                        <span class="topo-leg" style="color:var(--term-red);font-size:9px;">╌╌&nbsp;ERR</span>
+                    </div>
+                    <i class="fa-solid fa-circle ctrl-max" data-win="win-topo" style="color:var(--term-orange);font-size:8px"></i>
+                </div>
+                <div style="overflow:hidden;height:calc(100% - 28px);background:var(--bg-window);backdrop-filter:blur(12px);">
+                    <canvas id="topoCanvas"></canvas>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ═══ RIGHT COL ═══ -->
+        <div class="tile-col right-col">
+
+            <!-- ═══ PIPELINE PROGRESS FLOW ═══ -->
+            <div class="window" style="flex-shrink:0;" id="win-pipeline">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/pipeline</span> <span class="cmd">❯</span> watch --active</span>
+                    <span class="pipeline-file-name" id="pipeline-filename">/* idle */</span>
+                    <i class="fa-solid fa-circle ctrl-max" data-win="win-pipeline" style="color:var(--term-orange);font-size:8px"></i>
+                </div>
+                <div class="window-content blur-glass pipeline-body" id="pipeline-body">
+
+                    <div class="pipeline-stage" id="stage-0">
+                        <div class="stage-inner">
+                            <div class="stage-icon-wrap" id="sicon-0"><i class="fa-solid fa-file-arrow-up"></i></div>
+                            <div class="stage-info">
+                                <div class="stage-name"><span class="stage-num">01</span>&nbsp;EXTRACT TEXT</div>
+                                <div class="stage-bar-wrap"><div class="stage-bar-fill" id="bar-0"></div><div class="stage-shimmer" id="shimmer-0"></div></div>
+                                <div class="stage-meta"><span class="stage-pct" id="pct-0">—</span><span class="stage-status-txt" id="stxt-0">waiting</span></div>
+                            </div>
+                            <div class="stage-dot" id="dot-0"></div>
+                        </div>
+                        <div class="stage-connector" id="conn-0"><div class="conn-pulse" id="pulse-0"></div></div>
+                    </div>
+
+                    <div class="pipeline-stage" id="stage-1">
+                        <div class="stage-inner">
+                            <div class="stage-icon-wrap" id="sicon-1"><i class="fa-solid fa-scissors"></i></div>
+                            <div class="stage-info">
+                                <div class="stage-name"><span class="stage-num">02</span>&nbsp;SMART CHUNK</div>
+                                <div class="stage-bar-wrap"><div class="stage-bar-fill" id="bar-1"></div><div class="stage-shimmer" id="shimmer-1"></div></div>
+                                <div class="stage-meta"><span class="stage-pct" id="pct-1">—</span><span class="stage-status-txt" id="stxt-1">waiting</span></div>
+                            </div>
+                            <div class="stage-dot" id="dot-1"></div>
+                        </div>
+                        <div class="stage-connector" id="conn-1"><div class="conn-pulse" id="pulse-1"></div></div>
+                    </div>
+
+                    <div class="pipeline-stage" id="stage-2">
+                        <div class="stage-inner">
+                            <div class="stage-icon-wrap" id="sicon-2"><i class="fa-solid fa-language"></i></div>
+                            <div class="stage-info">
+                                <div class="stage-name"><span class="stage-num">03</span>&nbsp;TRANSLATE</div>
+                                <div class="stage-bar-wrap"><div class="stage-bar-fill" id="bar-2"></div><div class="stage-shimmer" id="shimmer-2"></div></div>
+                                <div class="stage-meta"><span class="stage-pct" id="pct-2">—</span><span class="stage-status-txt" id="stxt-2">waiting</span></div>
+                            </div>
+                            <div class="stage-dot" id="dot-2"></div>
+                        </div>
+                        <div class="stage-connector" id="conn-2"><div class="conn-pulse" id="pulse-2"></div></div>
+                    </div>
+
+                    <div class="pipeline-stage" id="stage-3">
+                        <div class="stage-inner">
+                            <div class="stage-icon-wrap" id="sicon-3"><i class="fa-solid fa-layer-group"></i></div>
+                            <div class="stage-info">
+                                <div class="stage-name"><span class="stage-num">04</span>&nbsp;ASSEMBLE</div>
+                                <div class="stage-bar-wrap"><div class="stage-bar-fill" id="bar-3"></div><div class="stage-shimmer" id="shimmer-3"></div></div>
+                                <div class="stage-meta"><span class="stage-pct" id="pct-3">—</span><span class="stage-status-txt" id="stxt-3">waiting</span></div>
+                            </div>
+                            <div class="stage-dot" id="dot-3"></div>
+                        </div>
+                        <div class="stage-connector" id="conn-3"><div class="conn-pulse" id="pulse-3"></div></div>
+                    </div>
+
+                    <div class="pipeline-stage" id="stage-4">
+                        <div class="stage-inner">
+                            <div class="stage-icon-wrap" id="sicon-4"><i class="fa-solid fa-file-pdf"></i></div>
+                            <div class="stage-info">
+                                <div class="stage-name"><span class="stage-num">05</span>&nbsp;CREATE PDF</div>
+                                <div class="stage-bar-wrap"><div class="stage-bar-fill" id="bar-4"></div><div class="stage-shimmer" id="shimmer-4"></div></div>
+                                <div class="stage-meta"><span class="stage-pct" id="pct-4">—</span><span class="stage-status-txt" id="stxt-4">waiting</span></div>
+                            </div>
+                            <div class="stage-dot" id="dot-4"></div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- LOG TERMINAL -->
+            <div class="window log-window" style="flex:1;min-height:0;" id="win-log">
+                <div class="window-bar">
+                    <span class="prompt"><span class="path">~/logs</span> <span class="cmd">❯</span> tail -f system.log</span>
+                    <i class="fa-solid fa-circle ctrl-max" data-win="win-log" style="color:var(--term-orange);font-size:8px"></i>
+                </div>
+                <div class="log-toolbar">
+                    <div class="log-filters">
+                        <button class="log-filter-btn active" data-filter="ALL">ALL</button>
+                        <button class="log-filter-btn" data-filter="sys">SYS</button>
+                        <button class="log-filter-btn" data-filter="warn">WARN</button>
+                        <button class="log-filter-btn" data-filter="err">ERR</button>
+                    </div>
+                    <div class="log-search-wrap">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <input type="text" id="log-search" class="log-search-input" placeholder="grep...">
+                    </div>
+                    <button class="log-clear-btn" id="log-clear-btn"><i class="fa-solid fa-trash-can"></i></button>
+                </div>
+                <div class="window-content terminal-body-term blur-glass" id="terminal-output"></div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- MODALS -->
+    <div class="modal-overlay" id="queue-modal">
+        <div class="modal-window">
+            <div class="window-bar">
+                <span class="prompt"><span class="path">~/queue</span> <span class="cmd">❯</span> ls -la --sort=priority</span>
+                <span class="window-controls modal-close" data-modal="queue-modal"><i class="fa-solid fa-xmark"></i> [ESC]</span>
+            </div>
+            <div class="modal-body blur-glass">
+                <div class="modal-scroll">
+                    <table class="term-table">
+                        <thead><tr><th>ID</th><th>FILENAME</th><th>TYPE</th><th>PROGRESS</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
+                        <tbody id="queue-table-body"></tbody>
+                    </table>
+                </div>
+                <div class="modal-footer">
+                    <button class="term-btn primary" id="add-file-queue-btn"><i class="fa-solid fa-plus"></i> ADD FILE</button>
+                    <button class="term-btn" id="clear-done-btn"><i class="fa-solid fa-check-double"></i> CLEAR DONE</button>
+                    <button class="term-btn danger" id="pause-all-btn"><i class="fa-solid fa-pause"></i> PAUSE ALL</button>
+                    <input type="file" id="modal-file-input" hidden accept=".pdf,.docx">
+                    <span class="modal-info comment" id="queue-stats-info"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="api-modal">
+        <div class="modal-window" style="max-width:780px;">
+            <div class="window-bar">
+                <span class="prompt"><span class="path">~/api</span> <span class="cmd">❯</span> ./key-manager --interactive</span>
+                <span class="window-controls modal-close" data-modal="api-modal"><i class="fa-solid fa-xmark"></i> [ESC]</span>
+            </div>
+            <div class="modal-body blur-glass">
+                <div class="modal-scroll">
+                    <table class="term-table">
+                        <thead><tr><th>ALIAS</th><th>KEY (MASKED)</th><th>STATUS</th><th>TPM USED</th><th>LIMIT</th><th>USAGE BAR</th><th>ACTIONS</th></tr></thead>
+                        <tbody id="api-table-body"></tbody>
+                    </table>
+                </div>
+                <div class="modal-footer">
+                    <span class="comment">$ add_key &gt;&gt;</span>
+                    <input type="text" class="term-input" id="new-key-input" placeholder="AIzaSy... (paste full key)">
+                    <button class="term-btn primary" id="add-key-btn"><i class="fa-solid fa-plus"></i> ADD KEY</button>
+                    <button class="term-btn" id="rotate-keys-btn"><i class="fa-solid fa-rotate"></i> ROTATE</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
