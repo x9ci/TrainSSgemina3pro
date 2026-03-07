@@ -437,7 +437,7 @@ const ganttCanvas = document.getElementById('ganttCanvas');
 const ganttCtx    = ganttCanvas.getContext('2d');
 const WORKERS     = 6;
 const GANTT_W     = 22000;
-const FILES_G     = ['Quantum.pdf','AI_Res.docx','DataSt.pdf','Neuro.pdf','Blade.pdf','Physics.docx'];
+const CHUNK_NAMES = Array.from({length:20}, (_,i)=> `chunk_${String(i+1).padStart(3,'0')}`);
 const WCOLS       = [C.green,C.blue,C.orange,C.purple,C.aqua,'#d65d0e'];
 const workerJobs  = Array.from({length:WORKERS}, ()=>[]);
 
@@ -445,7 +445,7 @@ function addGanttJob(w, file, dur) {
     const now = Date.now();
     workerJobs[w].push({start:now, end:now+dur, file, color:WCOLS[Math.floor(Math.random()*WCOLS.length)]});
 }
-for (let w=0; w<WORKERS; w++) addGanttJob(w, FILES_G[w%FILES_G.length], 4000+Math.random()*9000);
+for (let w=0; w<WORKERS; w++) addGanttJob(w, CHUNK_NAMES[w%CHUNK_NAMES.length], 4000+Math.random()*9000);
 
 function drawGantt() {
     const cw = ganttCanvas.parentElement.clientWidth;
@@ -491,7 +491,7 @@ drawGantt();
 
 function spawnGanttJob() {
     const w = Math.floor(Math.random()*WORKERS);
-    addGanttJob(w, FILES_G[Math.floor(Math.random()*FILES_G.length)], 3000+Math.random()*11000);
+    addGanttJob(w, CHUNK_NAMES[Math.floor(Math.random()*CHUNK_NAMES.length)], 3000+Math.random()*11000);
     workerJobs.forEach((jobs,i) => { workerJobs[i]=jobs.filter(j=>j.end>Date.now()-GANTT_W*1.5); });
     setTimeout(spawnGanttJob, 1200+Math.random()*2400);
 }
@@ -769,26 +769,33 @@ function spawnTopoParticles() {
     const worYs = NODES.workers.map((_,i) => pad+(i+0.5)*((ch-pad*2)/NODES.workers.length));
     const engY=midY, dbY=midY*0.6, queY=midY*1.4, apiY=midY, outY=midY;
 
-    // Random worker → engine
-    const wi = Math.floor(Math.random()*NODES.workers.length);
-    const load = topoEdgeLoad[wi%3];
-    const pcol = load > 0.88 ? C.orange : C.green;
-    spawnParticle(worX,worYs[wi], engX,engY,
-        worX+(engX-worX)*0.5, worYs[wi],
-        worX+(engX-worX)*0.5, engY, pcol);
+    // Fast-paced simulation: multiple particles can spawn in one tick
 
-    // Engine → DB or Queue
-    if (Math.random() > 0.45) spawnParticle(engX+18,engY, dbX-12,dbY, engX+60,engY, dbX-60,dbY, C.green);
-    if (Math.random() > 0.55) spawnParticle(engX+18,engY, queX-12,queY, engX+60,engY, queX-60,queY, C.blue);
+    // Workers → Engine (Simulating chunk results coming back)
+    for(let i=0; i<2; i++) {
+        const wi = Math.floor(Math.random()*NODES.workers.length);
+        const load = topoEdgeLoad[wi%3];
+        const pcol = load > 0.88 ? C.orange : C.green;
+        if (Math.random() > 0.3) spawnParticle(worX,worYs[wi], engX,engY,
+            worX+(engX-worX)*0.5, worYs[wi],
+            worX+(engX-worX)*0.5, engY, pcol);
+    }
 
-    // DB → API
-    if (Math.random() > 0.35) spawnParticle(dbX+14,dbY, apiX-20,apiY, dbX+60,dbY, apiX-60,apiY, C.orange);
-    // Queue → API
-    if (Math.random() > 0.5) spawnParticle(queX+14,queY, apiX-20,apiY, queX+60,queY, apiX-60,apiY, C.blue);
-    // API → Output
-    if (Math.random() > 0.4) spawnParticle(apiX+20,apiY, outX-16,outY, apiX+60,apiY, outX-60,outY, C.green);
+    // Engine → DB or Queue (Simulating caching and task distribution)
+    if (Math.random() > 0.3) spawnParticle(engX+18,engY, dbX-12,dbY, engX+60,engY, dbX-60,dbY, C.green);
+    if (Math.random() > 0.4) spawnParticle(engX+18,engY, queX-12,queY, engX+60,engY, queX-60,queY, C.blue);
 
-    setTimeout(spawnTopoParticles, 250+Math.random()*550);
+    // DB → API (DB context to API)
+    if (Math.random() > 0.2) spawnParticle(dbX+14,dbY, apiX-20,apiY, dbX+60,dbY, apiX-60,apiY, C.orange);
+
+    // Queue → API (Tasks to Gemini API - high traffic)
+    if (Math.random() > 0.2) spawnParticle(queX+14,queY, apiX-20,apiY, queX+60,queY, apiX-60,apiY, C.blue);
+
+    // API → Output (Gemini results to PDF writer)
+    if (Math.random() > 0.3) spawnParticle(apiX+20,apiY, outX-16,outY, apiX+60,apiY, outX-60,outY, C.green);
+
+    // Call faster to make it look "busy"
+    setTimeout(spawnTopoParticles, 100+Math.random()*300);
 }
 setTimeout(spawnTopoParticles, 600);
 
@@ -926,12 +933,14 @@ setTimeout(() => {
 
 // Auto-refill queue when empty to keep dashboard busy
 const DEMO_FILES = [
-    {name:'Arabic_Philosophy.pdf', type:'PDF'},
-    {name:'Modern_Physics.docx',   type:'DOCX'},
-    {name:'Machine_Learning.pdf',  type:'PDF'},
-    {name:'World_History_V2.pdf',  type:'PDF'},
-    {name:'Chemistry_Lab.docx',    type:'DOCX'},
-    {name:'Sociology_Theory.pdf',  type:'PDF'},
+    {name:'The_Art_of_War.pdf', type:'PDF'},
+    {name:'1984_Novel.docx',   type:'DOCX'},
+    {name:'Dune_Chronicles.pdf',  type:'PDF'},
+    {name:'Crime_and_Punishment.pdf',  type:'PDF'},
+    {name:'Meditations.docx',    type:'DOCX'},
+    {name:'Brave_New_World.pdf',  type:'PDF'},
+    {name:'Foundation.pdf',  type:'PDF'},
+    {name:'Sapiens.docx',    type:'DOCX'}
 ];
 function autoRefillQueue() {
     const active = fileQueue.filter(f => f.status !== 'DONE').length;
@@ -1017,11 +1026,20 @@ setInterval(animateGauges, 2200);
 animateGauges();
 
 // ================================================================
-//  16. BACKGROUND LOG SIMULATION + LIVE STATS
+//  16. BACKGROUND LOG SIMULATION + LIVE STATS (Realistic PF.py Simulation)
 // ================================================================
-const OPS  = ['extract_pdf','chunk_text','gemini_req','save_db','vectorize','index_doc','cleanup_tmp','requeue','flush_cache','rotate_key'];
-const FLOG = ['Neuro_Ch1.pdf','Quantum.docx','BladeRunner.pdf','AI_Ethics.pdf','DataSci.docx','Mech_Eng.pdf','Sociology.docx','Calculus_V2.pdf','Philosophy.pdf','LingTheory.docx'];
-const CHUNKS_MSG = ['chunk 12/48','chunk 31/48','chunk 48/48 ✓','chunks merged','delta applied'];
+const PF_OPS = [
+    { op: 'extract_pdf',   prob: 0.10, tpl: 'Extracting text from <span class="string">"{file}"</span>... [<span class="log-sys">OK</span>]' },
+    { op: 'smart_chunk',   prob: 0.10, tpl: 'Smart text division: <span class="string">"{file}"</span> \u2192 <span class="number">{val1}</span> chapters' },
+    { op: 'token_est',     prob: 0.15, tpl: 'Estimating tokens for <span class="keyword">chunk_{idx}</span>: <span class="number">{val2}</span> tokens' },
+    { op: 'gemini_req',    prob: 0.20, tpl: 'Requesting <span class="keyword">gemini-2.5-pro</span> for <span class="keyword">chunk_{idx}</span>... <span class="comment">[{key}]</span>' },
+    { op: 'gemini_res',    prob: 0.20, tpl: 'Translation success <span class="keyword">chunk_{idx}</span> <span class="comment">({ms}ms)</span> [<span class="log-sys">OK</span>]' },
+    { op: 'quality_chk',   prob: 0.10, tpl: 'Quality check <span class="keyword">chunk_{idx}</span>: Coverage=<span class="number">{val1}.{val2}%</span>' },
+    { op: 'save_db',       prob: 0.10, tpl: 'Saved <span class="keyword">chunk_{idx}</span> to SQLite DB <span class="comment">[master_translation.db]</span>' },
+    { op: 'build_toc',     prob: 0.05, tpl: 'Generating Table of Contents for <span class="string">"{file}"</span>' }
+];
+
+const FLOG = ['The_Art_of_War.pdf','1984_Novel.pdf','Dune_Chronicles.docx','Crime_and_Punishment.pdf','Meditations.pdf','Brave_New_World.docx','Foundation.pdf','Sapiens.pdf'];
 
 // Live counters
 let liveBooks = 1204, livePages = 452000, liveThreads = 12;
@@ -1050,24 +1068,52 @@ setInterval(updateUptime, 60000);
 
 function simulateBackend() {
     const r  = Math.random();
-    const op = OPS[Math.floor(Math.random()*OPS.length)];
-    const f  = FLOG[Math.floor(Math.random()*FLOG.length)];
 
-    let type = 'info', status = '<span class="log-sys">OK</span>';
-    if (r > 0.86) { type='warn'; status='<span class="log-warn">DELAY</span>'; }
-    if (r > 0.96) { type='err';  status='<span class="log-err">FAIL</span>'; }
-
-    // Vary log messages for realism
-    let msg;
-    if (r < 0.3) {
-        const chk = CHUNKS_MSG[Math.floor(Math.random()*CHUNKS_MSG.length)];
-        msg = `<span class="keyword">${op}</span> <span class="punct">→</span> <span class="string">"${f}"</span> <span class="comment">[${chk}]</span> <span class="punct">[</span>${status}<span class="punct">]</span>`;
-    } else if (r < 0.55) {
-        const ms  = Math.floor(120 + Math.random()*880);
-        msg = `<span class="keyword">${op}</span> <span class="punct">→</span> <span class="string">"${f}"</span> <span class="comment">${ms}ms</span> <span class="punct">[</span>${status}<span class="punct">]</span>`;
-    } else {
-        msg = `<span class="keyword">${op}</span> <span class="punct">→</span> <span class="string">"${f}"</span> <span class="punct">[</span>${status}<span class="punct">]</span>`;
+    // Weighted random selection for operations
+    let cumulative = 0;
+    let selectedOp = PF_OPS[PF_OPS.length - 1];
+    for (const op of PF_OPS) {
+        cumulative += op.prob;
+        if (r <= cumulative) {
+            selectedOp = op;
+            break;
+        }
     }
+
+    // Contextual variables
+    const activeFile = pipelineActive ? pipelineFile : FLOG[Math.floor(Math.random() * FLOG.length)];
+    const val1 = Math.floor(Math.random() * 40 + 80); // 80-120 (e.g., chapters or % coverage)
+    const val2 = Math.floor(Math.random() * 8000 + 1000); // tokens or decimals
+    const idx  = String(Math.floor(Math.random() * 120 + 1)).padStart(3, '0');
+    const ms   = Math.floor(400 + Math.random() * 3200);
+    const activeKeys = apiKeys.filter(k => k.status === 'ACTIVE' && !k.disabled);
+    const key  = activeKeys.length > 0 ? activeKeys[Math.floor(Math.random() * activeKeys.length)].alias : 'KEY-?';
+
+    let msg = selectedOp.tpl
+        .replace('{file}', activeFile)
+        .replace('{val1}', val1)
+        .replace('{val2}', val2)
+        .replace('{idx}', idx)
+        .replace('{ms}', ms)
+        .replace('{key}', key);
+
+    let type = 'info';
+
+    // Inject occasional warnings / errors mimicking PF.py behavior
+    if (r > 0.94) {
+        const errType = Math.random();
+        if (errType > 0.6) {
+            type = 'warn';
+            msg = `<span class="keyword">rate_limit</span>: <span class="log-warn">API limit hit on ${key}, backing off for ${ms}ms...</span>`;
+        } else if (errType > 0.3) {
+            type = 'warn';
+            msg = `<span class="keyword">quality_control</span>: <span class="log-warn">Foreign content detected in chunk_${idx}, initiating comprehensive correction...</span>`;
+        } else {
+            type = 'err';
+            msg = `<span class="keyword">gemini_error</span>: <span class="log-err">503 Service Unavailable for chunk_${idx}. Retrying (attempt 2/6)...</span>`;
+        }
+    }
+
     asostAddLog(msg, type);
 
     // Occasionally increment live counters
@@ -1078,13 +1124,7 @@ function simulateBackend() {
         updatePolybarStats();
     }
 
-    // Randomly vary thread count
-    if (Math.random() > 0.93) {
-        liveThreads = Math.max(8, Math.min(16, liveThreads + (Math.random()>0.5?1:-1)));
-        const tEl = document.querySelector('#win-stats .number'); // threads display not in stats window
-    }
-
-    setTimeout(simulateBackend, 700 + Math.random()*1900);
+    setTimeout(simulateBackend, 600 + Math.random() * 1400);
 }
 
 // ================================================================
