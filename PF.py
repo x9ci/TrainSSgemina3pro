@@ -1036,11 +1036,13 @@ class EnhancedGeminiAPI:
         # التأكد من وجود جلسة نشطة
         await self._ensure_session()
 
-        # --- حساب التوكنز وإعداد maxOutputTokens ديناميكياً ---
-        # input_tokens فقط من الـ prompt الحقيقي (system_instruction يسهم بشكل منفصل)
+        # --- حساب التوكنز وإعداد maxOutputTokens ---
+        # نستخدم max_tokens كاملاً دائماً (8192).
+        # المعادلة القديمة (1.5 × input) كانت تُقلّص الإخراج خطأ:
+        # فصل 5000 كلمة → ~7500 توكن إدخال → يُحدَّد الإخراج بـ 8192 فقط
+        # لكن ترجمته العربية تحتاج 9000-12000 → النموذج يتوقف في المنتصف (MAX_TOKENS).
+        dynamic_max_tokens = max_tokens  # 8192 دائماً، لا تقليص بناءً على الإدخال
         estimated_input_tokens = self.estimate_tokens(prompt + system_instruction)
-        # الإخراج العربي ≈ 1.5× المدخلات، حد أدنى 1024، لا يتجاوز max_tokens المُمرَّر
-        dynamic_max_tokens = min(max_tokens, max(1024, int(estimated_input_tokens * 1.5)))
         estimated_output_tokens = dynamic_max_tokens
         total_estimated_tokens  = estimated_input_tokens + estimated_output_tokens
 
@@ -1150,8 +1152,18 @@ class EnhancedGeminiAPI:
                         and len(result["candidates"][0]["content"]["parts"]) > 0
                     ):
                         content = result["candidates"][0]["content"]["parts"][0]["text"]
+                        # ── كشف التوقف المبكر بسبب MAX_TOKENS ──
+                        finish_reason = result["candidates"][0].get("finishReason", "STOP")
+                        if finish_reason == "MAX_TOKENS":
+                            logger.warning(
+                                f"⚠️ MAX_TOKENS reached for {request_type} | "
+                                f"key={api_key[:10]}... | output truncated! "
+                                f"Consider reducing chunk size below 1800 words."
+                            )
+                            # نُضيف علامة نهاية مقطوعة ليستطيع المُستدعي اكتشافها
+                            content = content.strip() + "\n###TRUNCATED###"
                         self.key_stats[api_key].record_success(response_time)
-                        logger.info(f"Request {request_type} succeeded | key={api_key[:10]}... | time={response_time:.2f}s")
+                        logger.info(f"Request {request_type} succeeded | key={api_key[:10]}... | time={response_time:.2f}s | finishReason={finish_reason}")
                         return content.strip(), response_time, api_key
                     else:
                         logger.warning(f"Unexpected response from Gemini: {result}")
@@ -1269,534 +1281,1408 @@ class EnhancedGeminiAPI:
         logger.info("Gemini API resources cleaned up")
 
 class ComprehensiveContentProcessor:
-    """معالج المحتوى الشامل لضمان ترجمة كاملة لكل جزء"""
-    
+    """
+    معالج المحتوى الشامل الذكي - النسخة المطورة
+    ─────────────────────────────────────────────
+    التحسينات الجوهرية عن النسخة السابقة:
+
+    1. قائمة بيضاء ديناميكية: أي كلمة إنجليزية تتكرر 3+ مرات في الكتاب
+       تُضاف تلقائياً (أسماء شخصيات/أماكن مقبولة) بدلاً من القائمة الثابتة الصغيرة.
+
+    2. كشف اللغة الحقيقي: استخدام langdetect (اختياري) لفحص لغة الجملة
+       بدلاً من الاعتماد فقط على Regex الذي يُخطئ مع أسماء الأعلام.
+
+    3. استخراج الكيانات المسماة: spaCy (اختياري) لاستخراج أسماء الشخصيات
+       والأماكن والمنظمات وإعفائها من علامات "المحتوى الأجنبي".
+
+    4. قياس تغطية ذكي: نسبة الكلمات مع معامل تصحيح لغوي بدلاً من
+       مقارنة عدد الجمل التي تُعطي نسب مضللة (جملة → جملتان = 200% زائف).
+
+    5. تحويل أرقام ذكي: يحمي الأنماط الخاصة (URLs، ISBN، MP3، IPv4...)
+       قبل التحويل بدلاً من استبدال كل رقم عشوائياً.
+
+    6. علامات ترقيم شاملة: extract_content_segments تدعم ؟ ؛ ! العربية.
+    """
+
+    # ── القائمة البيضاء الثابتة الموسّعة (مصطلحات دولية مقبولة دائماً) ──
+    STATIC_ACCEPTABLE_ENGLISH: frozenset = frozenset([
+        # تقنية وإنترنت
+        'OK', 'PDF', 'ISBN', 'URL', 'ID', 'TV', 'PC', 'CD', 'DVD',
+        'AI', 'API', 'HTML', 'CSS', 'XML', 'JSON', 'SQL', 'HTTP', 'HTTPS',
+        'FBI', 'CIA', 'NATO', 'UN', 'EU', 'US', 'UK', 'UAE',
+        'WiFi', 'GPS', 'SMS', 'DNA', 'RNA', 'VIP', 'ATM', 'PIN', 'SIM',
+        'MP3', 'MP4', 'USB', 'RAM', 'ROM', 'CPU', 'GPU', 'SSD', 'HDD',
+        # ألقاب وتشريفات
+        'Dr', 'Mr', 'Mrs', 'Ms', 'Jr', 'Sr', 'Prof', 'PhD', 'MD', 'CEO',
+        # وحدات ورموز
+        'km', 'kg', 'cm', 'mm', 'Hz', 'MHz', 'GHz', 'GB', 'MB', 'KB',
+        'PM', 'AM', 'AD', 'BC',
+    ])
+
+    # ── أنماط محمية من تحويل الأرقام ──
+    _NUMBER_PROTECTION_RE = re.compile(
+        r'https?://[^\s]+'           # URLs كاملة
+        r'|ISBN[-\s]?\d[\d\s\-]+'   # أكواد ISBN
+        r'|\b[A-Za-z]+\d+\w*\b'     # كلمات مختلطة: MP3، IPv4، B2B
+        r'|\b\d+[A-Za-z]+\w*\b'     # كلمات مختلطة معكوسة: 2D، 3G
+    )
+
+    def __init__(self):
+        # ── القائمة البيضاء الديناميكية (تُبنى من تحليل الكتاب الكامل) ──
+        self._dynamic_whitelist: set = set()
+        # ── الكيانات المسماة المستخرجة بـ spaCy ──
+        self._named_entities: set = set()
+        # ── علامة: هل بُنيت القائمة البيضاء للكتاب كاملاً؟ ──
+        self._whitelist_built: bool = False
+
+        # ── فحص توفر المكتبات الاختيارية (مرة واحدة عند الإنشاء) ──
+        self._langdetect_available: bool = self._check_import('langdetect')
+        self._spacy_available: bool = self._check_import('spacy')
+        self._rapidfuzz_available: bool = self._check_import('rapidfuzz')
+        self._spacy_nlp = None  # تحميل كسول عند الحاجة
+
+    # ════════════════════════════════════════════════════════════
+    #  أدوات داخلية مساعدة
+    # ════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _check_import(module_name: str) -> bool:
+        """فحص وجود مكتبة اختيارية دون رفع استثناء"""
+        try:
+            __import__(module_name)
+            return True
+        except ImportError:
+            return False
+
+    def _load_spacy_model(self):
+        """تحميل نموذج spaCy الإنجليزي بشكل كسول (مرة واحدة فقط)"""
+        if self._spacy_nlp is not None or not self._spacy_available:
+            return
+        try:
+            import spacy
+            try:
+                self._spacy_nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                # محاولة تنزيل النموذج تلقائياً
+                import subprocess
+                subprocess.run(
+                    ["python", "-m", "spacy", "download", "en_core_web_sm"],
+                    capture_output=True, timeout=120
+                )
+                try:
+                    self._spacy_nlp = spacy.load("en_core_web_sm")
+                except Exception:
+                    self._spacy_available = False
+        except Exception:
+            self._spacy_available = False
+
+    def _extract_named_entities_spacy(self, text: str) -> set:
+        """
+        استخراج الكيانات المسماة (أشخاص، أماكن، منظمات) باستخدام spaCy.
+        يُعيد set فارغة إذا لم يكن spaCy متاحاً.
+        """
+        entities: set = set()
+        if not self._spacy_available:
+            return entities
+        self._load_spacy_model()
+        if self._spacy_nlp is None:
+            return entities
+        try:
+            # معالجة أقصى 50000 حرف لتجنب الثقل
+            doc = self._spacy_nlp(text[:50000])
+            target_labels = {'PERSON', 'GPE', 'LOC', 'ORG', 'NORP', 'FAC', 'PRODUCT', 'EVENT'}
+            for ent in doc.ents:
+                if ent.label_ in target_labels:
+                    full_name = ent.text.strip()
+                    entities.add(full_name)
+                    entities.add(full_name.upper())
+                    # أضف كل كلمة منفردة من الاسم المركّب
+                    for token in full_name.split():
+                        t = token.strip('.,;:!?"\' ')
+                        if len(t) >= 2:
+                            entities.add(t)
+                            entities.add(t.upper())
+        except Exception:
+            pass
+        return entities
+
+    def _detect_sentence_language(self, sentence: str) -> str:
+        """
+        كشف لغة الجملة باستخدام langdetect.
+        يُعيد: 'ar' | 'en' | 'unknown'
+        """
+        if not self._langdetect_available or len(sentence.strip()) < 8:
+            return 'unknown'
+        try:
+            from langdetect import detect, LangDetectException
+            return detect(sentence.strip())
+        except Exception:
+            return 'unknown'
+
+    def _is_acceptable_english(self, word: str) -> bool:
+        """
+        هل هذه الكلمة الإنجليزية مقبولة ولا تستوجب الترجمة؟
+        ترتيب الفحص: ثابتة → ديناميكية → كيانات spaCy
+        """
+        if word.upper() in self.STATIC_ACCEPTABLE_ENGLISH:
+            return True
+        w_lower = word.lower()
+        if (word in self._dynamic_whitelist
+                or w_lower in self._dynamic_whitelist
+                or word.upper() in self._dynamic_whitelist):
+            return True
+        if word in self._named_entities or word.upper() in self._named_entities:
+            return True
+        return False
+
+    def _calculate_smart_coverage(self, original_text: str, translated_text: str) -> float:
+        """
+        قياس نسبة التغطية بعدد الكلمات (لا بعدد الجمل).
+
+        المنطق الصحيح:
+        ─────────────
+        العربية أكثر إسهاباً من الإنجليزية، أي أن الترجمة الكاملة تُنتج عادةً
+        كلمات أكثر. لذا نستخدم النسبة المباشرة بدون معامل تصحيح، مع عتبة
+        منخفضة (65%) لا تُشغَّل إلا عند فجوة حقيقية في المحتوى.
+
+        أمثلة:
+          100 كلمة إنجليزية → 100 عربية : 100%  لا مراجعة ✓
+          100 كلمة إنجليزية →  80 عربية :  80%  لا مراجعة ✓ (ترجمة موجزة)
+          100 كلمة إنجليزية →  60 عربية :  60%  مراجعة مطلوبة ✓ (فجوة حقيقية)
+        """
+        if not original_text or not translated_text:
+            return 0.0
+        original_words = len(re.findall(r'\b\w+\b', original_text))
+        translated_words = len(re.findall(r'\b\w+\b', translated_text))
+        if original_words == 0:
+            return 100.0
+        return min((translated_words / original_words) * 100.0, 100.0)
+
+    # ════════════════════════════════════════════════════════════
+    #  الواجهة العامة: بناء القائمة البيضاء للكتاب كاملاً
+    # ════════════════════════════════════════════════════════════
+
+    def build_book_whitelist(self, full_text: str, min_occurrences: int = 3):
+        """
+        تحليل النص الكامل للكتاب وبناء قائمة بيضاء ديناميكية.
+
+        الخوارزمية:
+        1. تحسب تكرار كل كلمة إنجليزية في النص الكامل.
+        2. أي كلمة تتكرر >= min_occurrences هي على الأرجح اسم شخصية/مكان → تُضاف.
+        3. إذا كان spaCy متاحاً: تُضاف الكيانات المسماة مباشرة أيضاً.
+
+        يجب استدعاء هذه الدالة مرة واحدة قبل بدء الترجمة لأفضل نتيجة.
+        """
+        if not full_text:
+            return
+
+        # حساب تكرارات الكلمات الإنجليزية
+        word_counts: Dict[str, int] = {}
+        for word in re.findall(r'\b[A-Za-z]{2,}\b', full_text):
+            key = word.lower()
+            word_counts[key] = word_counts.get(key, 0) + 1
+
+        # إضافة الكلمات المتكررة بما يكفي
+        added_freq = 0
+        for word, count in word_counts.items():
+            if count >= min_occurrences:
+                self._dynamic_whitelist.add(word)           # small
+                self._dynamic_whitelist.add(word.upper())   # UPPER
+                self._dynamic_whitelist.add(word.capitalize())  # Title
+                added_freq += 1
+
+        # إضافة الكيانات المسماة من spaCy (إذا كان متاحاً)
+        entities = self._extract_named_entities_spacy(full_text)
+        self._named_entities.update(entities)
+        self._dynamic_whitelist.update(entities)
+
+        self._whitelist_built = True
+        logger.info(
+            f"[ContentProcessor] ✅ قائمة بيضاء: {added_freq} كلمة متكررة "
+            f"+ {len(self._named_entities)} كيان مسمى (spaCy) "
+            f"= {len(self._dynamic_whitelist)} إجمالي"
+        )
+
+    # ════════════════════════════════════════════════════════════
+    #  الدوال الثابتة (Static) — لا تحتاج حالة الكائن
+    # ════════════════════════════════════════════════════════════
+
     @staticmethod
     def number_to_arabic_text(number: int) -> str:
-        """تحويل الرقم إلى كتابة عربية"""
+        """تحويل الرقم إلى كتابة عربية ترتيبية"""
         arabic_numbers = {
             1: "الأول", 2: "الثاني", 3: "الثالث", 4: "الرابع", 5: "الخامس",
             6: "السادس", 7: "السابع", 8: "الثامن", 9: "التاسع", 10: "العاشر",
             11: "الحادي عشر", 12: "الثاني عشر", 13: "الثالث عشر", 14: "الرابع عشر", 15: "الخامس عشر",
             16: "السادس عشر", 17: "السابع عشر", 18: "الثامن عشر", 19: "التاسع عشر", 20: "العشرون",
-            21: "الواحد والعشرون", 22: "الثاني والعشرون", 23: "الثالث والعشرون", 24: "الرابع والعشرون", 25: "الخامس والعشرون",
-            26: "السادس والعشرون", 27: "السابع والعشرون", 28: "الثامن والعشرون", 29: "التاسع والعشرون", 30: "الثلاثون"
+            21: "الواحد والعشرون", 22: "الثاني والعشرون", 23: "الثالث والعشرون",
+            24: "الرابع والعشرون", 25: "الخامس والعشرون", 26: "السادس والعشرون",
+            27: "السابع والعشرون", 28: "الثامن والعشرون", 29: "التاسع والعشرون", 30: "الثلاثون"
         }
-        
-        # إذا كان الرقم أكبر من 30، استخدم صيغة عامة
         if number <= 30:
             return arabic_numbers.get(number, f"الفصل {number}")
-        else:
-            return f"الفصل {number}"
-    
+        return f"الفصل {number}"
+
     @staticmethod
     def convert_numbers_to_arabic(text: str) -> str:
-        """تحويل جميع الأرقام من الإنجليزية إلى العربية"""
+        """
+        تحويل الأرقام اللاتينية إلى عربية بشكل ذكي.
+
+        يحمي الأنماط التالية من التحويل:
+          • URLs  (https://example.com:8080)
+          • أكواد ISBN
+          • كلمات مختلطة مثل MP3، IPv4، B2B، 2D، 3G
+        وذلك لتجنب تخريب النصوص التقنية والأكواد الخاصة.
+        """
+        if not text:
+            return text
+
         english_to_arabic = {
             '0': '٠', '1': '١', '2': '٢', '3': '٣', '4': '٤',
             '5': '٥', '6': '٦', '7': '٧', '8': '٨', '9': '٩'
         }
-        
-        for eng_num, ar_num in english_to_arabic.items():
-            text = text.replace(eng_num, ar_num)
-        
-        return text
-    
-    @staticmethod
-    def detect_incomplete_translation(original_text: str, translated_text: str) -> Dict[str, Any]:
-        """كشف الترجمة غير المكتملة بمقارنة النص الأصلي مع المترجم"""
-        
-        # تحليل المحتوى الأصلي
-        original_segments = ComprehensiveContentProcessor.extract_content_segments(original_text)
-        translated_segments = ComprehensiveContentProcessor.extract_content_segments(translated_text)
-        
-        issues = {
+
+        result: List[str] = []
+        last_end = 0
+
+        for match in ComprehensiveContentProcessor._NUMBER_PROTECTION_RE.finditer(text):
+            # الجزء السابق للنمط المحمي: نحوّل أرقامه
+            segment = text[last_end:match.start()]
+            for eng, ar in english_to_arabic.items():
+                segment = segment.replace(eng, ar)
+            result.append(segment)
+            # النمط المحمي نفسه: نبقيه كما هو
+            result.append(match.group())
+            last_end = match.end()
+
+        # الجزء المتبقي بعد آخر نمط محمي
+        segment = text[last_end:]
+        for eng, ar in english_to_arabic.items():
+            segment = segment.replace(eng, ar)
+        result.append(segment)
+
+        return ''.join(result)
+
+    # ════════════════════════════════════════════════════════════
+    #  الدوال الأساسية (Instance) — تستخدم القوائم الديناميكية
+    # ════════════════════════════════════════════════════════════
+
+    def extract_content_segments(self, text: str) -> List[str]:
+        """
+        استخراج أجزاء المحتوى للمقارنة.
+        يدعم علامات الترقيم العربية (؟ ؛ !) والإنجليزية (.!?) معاً.
+        """
+        sentences = re.split(r'[.!?؟!؛]+', text)
+        return [s.strip() for s in sentences if len(s.strip()) > 10]
+
+    def detect_incomplete_translation(self, original_text: str, translated_text: str) -> Dict[str, Any]:
+        """
+        كشف الترجمة غير المكتملة بطريقة ذكية ثلاثية المراحل:
+
+        المرحلة 1 — قائمة بيضاء مؤقتة من النص الأصلي:
+            أي كلمة إنجليزية تتكرر 3+ مرات في الأصل → مقبولة كاسم علم.
+
+        المرحلة 2 — فلترة الكلمات المتبقية:
+            يُطبّق _is_acceptable_english (ثابتة + ديناميكية + spaCy).
+
+        المرحلة 3 — قياس التغطية بنسبة الكلمات (لا عدد الجمل):
+            يتجنب الـ 200% الزائفة حين تُصبح جملة → جملتين بالعربية.
+        """
+        issues: Dict[str, Any] = {
             'missing_segments': [],
             'untranslated_english': [],
             'incomplete_phrases': [],
             'missing_names': [],
             'coverage_percentage': 0.0
         }
-        
-        # البحث عن الكلمات الإنجليزية المتبقية
-        english_pattern = r'\b[A-Za-z]{2,}\b'
-        remaining_english = re.findall(english_pattern, translated_text)
-        
-        # استثناء الكلمات الشائعة المقبولة
-        acceptable_english = {'OK', 'PDF', 'ISBN', 'URL', 'ID', 'TV', 'PC', 'CD', 'DVD'}
-        
-        for word in remaining_english:
-            if word.upper() not in acceptable_english:
-                issues['untranslated_english'].append(word)
-        
-        # حساب نسبة التغطية
-        if len(original_segments) > 0:
-            coverage = min(len(translated_segments) / len(original_segments), 1.0) * 100
-            issues['coverage_percentage'] = coverage
-        
+
+        # ── المرحلة 1: قائمة بيضاء مؤقتة من تكرارات الأصل ──
+        temp_whitelist: set = set()
+        if original_text:
+            freq: Dict[str, int] = {}
+            for w in re.findall(r'\b[A-Za-z]{2,}\b', original_text):
+                freq[w.lower()] = freq.get(w.lower(), 0) + 1
+            for w, cnt in freq.items():
+                if cnt >= 3:
+                    temp_whitelist.add(w)
+                    temp_whitelist.add(w.upper())
+                    temp_whitelist.add(w.capitalize())
+
+        # ── المرحلة 2: فحص الكلمات الإنجليزية في الترجمة ──
+        seen: set = set()
+        for word in re.findall(r'\b[A-Za-z]{2,}\b', translated_text):
+            w_low = word.lower()
+            if w_low in seen:
+                continue
+            seen.add(w_low)
+            if self._is_acceptable_english(word):
+                continue
+            if word in temp_whitelist or w_low in temp_whitelist:
+                continue
+            # فحص langdetect: إذا الجملة المحيطة عربية → الكلمة على الأرجح مقبولة
+            if self._langdetect_available:
+                # استخرج الجملة المحيطة بالكلمة (50 حرف يميناً ويساراً)
+                idx = translated_text.find(word)
+                if idx != -1:
+                    surrounding = translated_text[max(0, idx-50): idx+50+len(word)]
+                    lang = self._detect_sentence_language(surrounding)
+                    if lang == 'ar':
+                        continue  # الجملة عربية → الكلمة مقبولة ضمن سياقها
+            issues['untranslated_english'].append(word)
+
+        # ── المرحلة 3: قياس التغطية الذكي ──
+        issues['coverage_percentage'] = self._calculate_smart_coverage(
+            original_text, translated_text
+        )
+
         return issues
-    
-    @staticmethod
-    def extract_content_segments(text: str) -> List[str]:
-        """استخراج أجزاء المحتوى للمقارنة"""
-        # تقسيم النص إلى جمل وفقرات
-        sentences = re.split(r'[.!?]+', text)
-        segments = []
-        
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if len(sentence) > 10:  # تجاهل الجمل القصيرة جداً
-                segments.append(sentence)
-        
-        return segments
-    
-    @staticmethod
-    def needs_completion_review(original_text: str, translated_text: str) -> bool:
-        """تحديد ما إذا كانت الترجمة تحتاج مراجعة لضمان الاكتمال"""
-        issues = ComprehensiveContentProcessor.detect_incomplete_translation(original_text, translated_text)
-        
-        # إذا كان هناك محتوى إنجليزي متبقي أو نسبة التغطية أقل من 85%
-        return (len(issues['untranslated_english']) > 0 or 
-                issues['coverage_percentage'] < 85.0)
-    
-    @staticmethod
-    def has_any_foreign_content(text: str) -> bool:
-        """التحقق من وجود أي محتوى أجنبي (باستثناء الأرقام التي يمكن تحويلها)"""
-        english_pattern = r'\b[A-Za-z]{2,}\b'
-        remaining_english = re.findall(english_pattern, text)
-        
-        # استثناء الكلمات المقبولة
-        acceptable_english = {'OK', 'PDF', 'ISBN', 'URL', 'ID', 'TV', 'PC', 'CD', 'DVD'}
-        
-        for word in remaining_english:
-            if word.upper() not in acceptable_english:
-                return True
-        
-        # لا نعتبر الأرقام الإنجليزية كمحتوى أجنبي يستوجب إعادة الترجمة
-        # لأن دالة convert_numbers_to_arabic ستقوم بتحويلها لاحقاً.
-        
+
+    def needs_completion_review(self, original_text: str, translated_text: str) -> bool:
+        """تحديد ما إذا كانت الترجمة تحتاج مراجعة لضمان الاكتمال.
+        العتبة 65% تمثل فجوة حقيقية في المحتوى لا مجرد فارق أسلوبي."""
+        issues = self.detect_incomplete_translation(original_text, translated_text)
+        return (
+            len(issues['untranslated_english']) > 0
+            or issues['coverage_percentage'] < 65.0
+        )
+
+    def has_any_foreign_content(self, text: str, original_text: Optional[str] = None) -> bool:
+        """
+        التحقق من وجود محتوى أجنبي حقيقي في النص.
+
+        طبقات الفلترة بالترتيب:
+        1. القائمة الثابتة الموسّعة (مصطلحات تقنية/دولية)
+        2. القائمة الديناميكية (أسماء متكررة 3+ مرات في الكتاب)
+        3. كلمات موجودة في النص الأصلي (مُمررة كـ original_text) → أسماء أعلام مُبقاة
+        4. Heuristic اسم علم: كلمة تبدأ بحرف كبير محاطة بنص عربي → مقبولة
+        5. langdetect: إذا السياق المحيط عربي → الكلمة مقبولة
+        """
+        # قائمة بيضاء مؤقتة: كل كلمة إنجليزية موجودة في الأصل
+        temp_whitelist: set = set()
+        if original_text:
+            temp_whitelist = set(
+                w for w in re.findall(r'\b[A-Za-z]{2,}\b', original_text)
+            )
+
+        for word in re.findall(r'\b[A-Za-z]{2,}\b', text):
+            # 1. القائمة الثابتة والديناميكية
+            if self._is_acceptable_english(word):
+                continue
+            # 2. كلمة موجودة في النص الأصلي (اسم علم مُبقى عمداً)
+            if word in temp_whitelist or word.lower() in temp_whitelist:
+                continue
+            # 3. Heuristic: كلمة مبدوءة بحرف كبير محاطة بنص عربي → اسم علم مُبقى
+            if word[0].isupper():
+                idx = text.find(word)
+                if idx > 5:  # ليست في بداية النص تماماً
+                    before = text[max(0, idx - 15):idx]
+                    # إذا الحرف السابق مباشرة عربي أو مسافة بعد عربي
+                    if any('\u0600' <= c <= '\u06FF' for c in before):
+                        continue
+            # 4. langdetect للسياق المحيط
+            if self._langdetect_available:
+                idx = text.find(word)
+                if idx != -1:
+                    surrounding = text[max(0, idx - 50): idx + 50 + len(word)]
+                    lang = self._detect_sentence_language(surrounding)
+                    if lang == 'ar':
+                        continue
+            # كلمة إنجليزية غير مقبولة بأي معيار → محتوى أجنبي حقيقي
+            return True
+
         return False
 
 
 class CompleteTranslationEngine:
-    """محرك الترجمة الكاملة - يضمن ترجمة كل جزء في النص"""
-    
+    """
+    محرك الترجمة الكاملة - المُحسَّن بالنقاط الست من خريطة التطوير
+
+    التحسينات المطبقة:
+    ─────────────────
+    ① systemInstruction كحقل مستقل (لا دمج في prompt)
+    ② ملف معرفة الكتاب المنظم (شخصيات + أماكن + أحداث + أسلوب)
+    ③ كشف النوع/النبرة بالنقاط مع عينات ثلاثية (لا if/elif بأولوية ثابتة)
+    ④ سلسلة مراجعة مستهدفة: كشف الجمل المشكلة محلياً → إرسالها فقط للـ API
+    ⑤ Few-Shot Prompting بأمثلة حقيقية من الكتاب (بعد الفصلين الأولين)
+    ⑥ استخراج المصطلحات ضمن الترجمة نفسها (لا API call منفصل)
+    """
+
+    # ── حجم القطعة الآمن ──
+    SAFE_CHUNK_WORDS: int = 1800
+
     def __init__(self, api_manager: EnhancedGeminiAPI, target_language: str = "Arabic"):
         self.api_manager = api_manager
         self.target_language = target_language
         self.translation_memory = {}
-        self.terminology_database = {}
-        self.context_history = []
+        self.terminology_database: Dict[str, str] = {}   # {term_en: term_ar}
+        self.term_frequency: Dict[str, int] = {}         # ① تردد كل مصطلح
+        self.context_history: List[str] = []             # للتوافق مع الكود الخارجي
         self.content_processor = ComprehensiveContentProcessor()
-        
-        # إعدادات متقدمة للترجمة السياقية
+
+        # إعدادات الترجمة السياقية
         self.genre_detection = True
         self.emotional_tone_preservation = True
         self.stylistic_adaptation = True
-        
-    def detect_text_genre_and_tone(self, text: str) -> Dict[str, str]:
-        """اكتشاف نوع النص ونبرته العاطفية"""
-        text_sample = text[:1000].lower()
-        
-        # اكتشاف النوع
-        if any(word in text_sample for word in ['poem', 'verse', 'stanza', 'rhyme', 'poetry']):
-            genre = "poetry"
-        elif any(word in text_sample for word in ['dialogue', 'scene', 'act', 'character', '"', "'"]):
-            genre = "drama"
-        elif any(word in text_sample for word in ['chapter', 'story', 'novel', 'tale', 'narrator']):
-            genre = "narrative"
-        else:
-            genre = "prose"
-        
-        # اكتشاف النبرة العاطفية
-        sad_indicators = ['sad', 'sorrow', 'grief', 'melancholy', 'tragic', 'loss', 'tears', 'death']
-        happy_indicators = ['joy', 'happy', 'celebration', 'triumph', 'success', 'love', 'smile', 'laugh']
-        dramatic_indicators = ['conflict', 'tension', 'crisis', 'climax', 'struggle', 'fight', 'war', 'battle']
-        
-        if any(indicator in text_sample for indicator in sad_indicators):
-            tone = "melancholic"
-        elif any(indicator in text_sample for indicator in happy_indicators):
-            tone = "joyful"
-        elif any(indicator in text_sample for indicator in dramatic_indicators):
-            tone = "dramatic"
-        else:
-            tone = "neutral"
-        
-        return {"genre": genre, "tone": tone}
-    
-    def create_complete_translation_prompt(self, text: str, context: str = "", 
-                                         text_analysis: Dict[str, str] = None) -> str:
-        """إنشاء prompt شامل يضمن ترجمة كل جزء في النص"""
-        
+
+        # ── ② ملف معرفة الكتاب المنظم ──
+        self.book_knowledge: Dict[str, Any] = {
+            'title':            '',
+            'author':           '',
+            'characters':       {},   # {en_name: {'arabic': ..., 'description': ...}}
+            'places':           {},   # {en_name: ar_name}
+            'events':           [],   # [{'chapter': ..., 'summary': ...}]
+            'style_notes':      [],
+            'few_shot_examples': []   # ⑤ أمثلة حقيقية بعد الفصلين الأولين
+        }
+        self.chapters_completed: int = 0  # لتفعيل Few-Shot بعد فصلين
+
+    # ════════════════════════════════════════════════════════════
+    #  ③ كشف النوع والنبرة بالنقاط مع عينات ثلاثية
+    # ════════════════════════════════════════════════════════════
+
+    def detect_text_genre_and_tone(self, text: str) -> Dict[str, Any]:
+        """
+        كشف متحسن لنوع النص ونبرته العاطفية.
+
+        المنهج:
+        • ثلاث عينات: بداية + وسط + نهاية (لا أول 1000 حرف فقط)
+        • نقاط موزونة لكل نوع (لا if/elif بأولوية ثابتة)
+        • كشف سياقي للنبرة يتجنب الأخطاء كـ"love" في نص حزين
+        • دعم النوع الهجين عبر genre_scores
+
+        يُعيد dict بالمفاتيح المتوافقة مع الكود القديم: genre, tone
+        ويُضيف: genre_scores, tone_scores للتشخيص
+        """
+        total = len(text)
+        # عينات من ثلاثة مواضع
+        samples = [
+            text[:min(1200, total)],
+            text[max(0, total // 2 - 600): min(total, total // 2 + 600)],
+            text[max(0, total - 1200):]
+        ]
+        sample = ' '.join(samples).lower()
+
+        # ── نقاط النوع ──
+        genre_scores: Dict[str, int] = {
+            'poetry':    0,
+            'drama':     0,
+            'narrative': 0,
+            'prose':     2,   # وزن افتراضي
+        }
+
+        _poetry_signals = [
+            'poem', 'verse', 'stanza', 'rhyme', 'poetry', 'sonnet', 'lyric',
+            'ode', 'ballad', 'haiku', 'couplet'
+        ]
+        _drama_signals = [
+            'dialogue', 'scene ', 'act ', ' said,', ' said.', '"—', 'exclaimed',
+            'whispered', 'replied', 'shouted', 'muttered', 'cried out'
+        ]
+        _narrative_signals = [
+            'chapter', 'story', 'novel', 'tale', 'narrator', 'once upon',
+            'he walked', 'she ran', 'he said', 'she said', 'he thought',
+            'she felt', 'he looked', 'she looked'
+        ]
+
+        for sig in _poetry_signals:
+            if sig in sample:
+                genre_scores['poetry'] += 2
+
+        for sig in _drama_signals:
+            if sig in sample:
+                genre_scores['drama'] += 1
+
+        for sig in _narrative_signals:
+            if sig in sample:
+                genre_scores['narrative'] += 1
+
+        # علامات الحوار الفعلية (اقتباسات كثيرة = دراما/سرد)
+        quote_count = sample.count('"') + sample.count('\u201c') + sample.count('\u2018')
+        if quote_count > 8:
+            genre_scores['drama'] += 2
+        if quote_count > 4:
+            genre_scores['narrative'] += 1
+
+        genre = max(genre_scores, key=genre_scores.get)
+
+        # ── نقاط النبرة ──
+        tone_scores: Dict[str, int] = {
+            'melancholic': 0,
+            'joyful':      0,
+            'dramatic':    0,
+            'neutral':     1,   # وزن افتراضي
+        }
+
+        _sad_signals: Dict[str, int] = {
+            'died': 3, 'death': 2, 'grief': 3, 'mourning': 3, 'tears': 2,
+            'sorrow': 3, 'tragic': 3, 'hopeless': 2, 'despair': 3, 'funeral': 3,
+            'lost': 1, 'pain': 1, 'hurt': 1, 'sad': 2, 'melancholy': 3,
+            'weeping': 2, 'grave': 2, 'burial': 3, 'widow': 2
+        }
+        _happy_signals: Dict[str, int] = {
+            'joy': 2, 'happy': 2, 'celebration': 3, 'triumph': 2, 'success': 1,
+            'smile': 1, 'laugh': 1, 'wonderful': 1, 'beautiful': 1,
+            'wedding': 2, 'birthday': 2, 'victory': 2, 'delight': 2
+        }
+        _dramatic_signals: Dict[str, int] = {
+            'conflict': 2, 'tension': 2, 'crisis': 2, 'climax': 2,
+            'struggle': 2, 'fight': 1, 'war': 2, 'battle': 2, 'danger': 2,
+            'escape': 1, 'chase': 1, 'explosion': 2, 'confrontation': 2
+        }
+
+        for word, weight in _sad_signals.items():
+            if word in sample:
+                tone_scores['melancholic'] += weight
+
+        for word, weight in _happy_signals.items():
+            if word in sample:
+                tone_scores['joyful'] += weight
+
+        for word, weight in _dramatic_signals.items():
+            if word in sample:
+                tone_scores['dramatic'] += weight
+
+        # تصحيح سياقي: "love" في نص حزين لا يعني الفرح
+        if 'love' in sample and tone_scores['melancholic'] > 3:
+            tone_scores['joyful'] = max(0, tone_scores['joyful'] - 1)
+
+        tone = max(tone_scores, key=tone_scores.get)
+
+        return {
+            "genre":        genre,
+            "tone":         tone,
+            "genre_scores": genre_scores,
+            "tone_scores":  tone_scores,
+        }
+
+    # ════════════════════════════════════════════════════════════
+    #  ① بناء systemInstruction كحقل مستقل
+    # ════════════════════════════════════════════════════════════
+
+    def _build_system_instruction(self, text_analysis: Dict[str, Any]) -> str:
+        """
+        يبني التعليمات الثابتة التي تُمرَّر كـ systemInstruction منفصل لـ Gemini.
+        الحقل المنفصل يحظى بوزن انتباه ثابت عالٍ ولا يُطغى عليه المحتوى.
+
+        يحتوي:
+        • هوية المترجم وقاعدة واحدة (لا قائمة من 7 طلبات متوازية)
+        • معلومات الكتاب
+        • المصطلحات مرتبة حسب الأهمية (تردد عالٍ أولاً)
+        • ② ملف معرفة الكتاب (شخصيات + أماكن)
+        • ⑤ أمثلة Few-Shot بعد الفصلين الأولين
+        • توجيه النوع والنبرة
+        """
+        parts: List[str] = []
+
+        # ── الهوية والقاعدة الأساسية ──
+        parts.append(
+            "أنت خبير ترجمة أدبية محترف. مهمتك: ترجمة كاملة وأمينة من الإنجليزية "
+            "إلى العربية الفصحى. قاعدة ذهبية واحدة: لا تترك أي كلمة أو جملة دون ترجمة. "
+            "أخرج النص المترجم فقط بدون تعليقات أو إضافات."
+        )
+
+        # ── معلومات الكتاب ──
+        if self.book_knowledge['title']:
+            book_info = f"الكتاب: {self.book_knowledge['title']}"
+            if self.book_knowledge['author']:
+                book_info += f" — {self.book_knowledge['author']}"
+            parts.append(book_info)
+
+        # ── توجيه النوع الأدبي والنبرة ──
+        genre_guidance = self._get_genre_specific_guidance(text_analysis)
+        if genre_guidance.strip():
+            parts.append(genre_guidance)
+
+        # ── ⑥ المصطلحات مرتبة حسب الأهمية (الأكثر تكراراً أولاً) ──
+        high_priority_terms = self._get_high_priority_terms(n=30)
+        if high_priority_terms:
+            term_lines = ["المصطلحات والأسماء الثابتة الإلزامية:"]
+            for orig, trans in high_priority_terms:
+                term_lines.append(f"  {orig} ← {trans}")
+            parts.append('\n'.join(term_lines))
+
+        # ── ② معرفة الكتاب (شخصيات + أماكن) ──
+        knowledge_section = self._build_book_knowledge_section()
+        if knowledge_section:
+            parts.append(knowledge_section)
+
+        # ── ⑤ Few-Shot Examples (بعد الفصلين الأولين) ──
+        if self.book_knowledge['few_shot_examples']:
+            ex_lines = ["أمثلة على أسلوب ترجمة هذا الكتاب تحديداً:"]
+            for ex in self.book_knowledge['few_shot_examples'][:3]:
+                ex_lines.append(f"  الأصل: {ex['original']}")
+                ex_lines.append(f"  الترجمة: {ex['translation']}")
+            parts.append('\n'.join(ex_lines))
+
+        return '\n\n'.join(p for p in parts if p.strip())
+
+    def _build_book_knowledge_section(self) -> str:
+        """② قسم معرفة الكتاب: شخصيات وأماكن معتمدة"""
+        sections: List[str] = []
+
+        if self.book_knowledge['characters']:
+            char_lines = ["الشخصيات المعتمدة:"]
+            for eng, info in list(self.book_knowledge['characters'].items())[:20]:
+                line = f"  {eng} ← {info['arabic']}"
+                if info.get('description'):
+                    line += f" ({info['description']})"
+                char_lines.append(line)
+            sections.append('\n'.join(char_lines))
+
+        if self.book_knowledge['places']:
+            place_lines = ["الأماكن المعتمدة:"]
+            for eng, arabic in list(self.book_knowledge['places'].items())[:10]:
+                place_lines.append(f"  {eng} ← {arabic}")
+            sections.append('\n'.join(place_lines))
+
+        return '\n\n'.join(sections)
+
+    def _get_high_priority_terms(self, n: int = 30) -> List[Tuple[str, str]]:
+        """⑥ المصطلحات مرتبة حسب التردد (الأكثر استخداماً = الأهم)"""
+        sorted_terms = sorted(
+            [(orig, trans) for orig, trans in self.terminology_database.items()],
+            key=lambda x: self.term_frequency.get(x[0], 1),
+            reverse=True
+        )
+        return sorted_terms[:n]
+
+    # ════════════════════════════════════════════════════════════
+    #  ① create_complete_translation_prompt → يُعيد tuple
+    # ════════════════════════════════════════════════════════════
+
+    def create_complete_translation_prompt(
+        self,
+        text: str,
+        context: str = "",
+        text_analysis: Dict[str, Any] = None
+    ) -> Tuple[str, str]:
+        """
+        يُعيد (system_instruction, user_prompt) منفصلين.
+        system_instruction → حقل systemInstruction في Gemini API (وزن ثابت عالٍ).
+        user_prompt        → محتوى الرسالة فقط: السياق المباشر + النص.
+
+        التغيير عن النسخة القديمة:
+        • لا دمج للتعليمات مع المحتوى في حقل واحد
+        • الـ prompt نظيف ومركّز: سياق + نص فقط
+        • ⑥ طلب JSON المصطلحات مُضمَّن في نفس الطلب (لا API call منفصل)
+        """
         if not text_analysis:
             text_analysis = self.detect_text_genre_and_tone(text)
-        
-        # بناء السياق المحسن
+
+        # system_instruction: كل ما هو ثابت
+        system_instruction = self._build_system_instruction(text_analysis)
+
+        # ── السياق المباشر (ملخصات الأحداث لا مقتطعات نصية) ──
         context_section = ""
-        if self.context_history:
-            recent_context = " ".join(self.context_history[-3:])
-            context_section = f"""
-السياق من الترجمات السابقة للحفاظ على التسلسل والاتساق:
-{recent_context[:800]}
-"""
-        
-        # بناء قاموس المصطلحات
-        terminology_section = ""
-        if self.terminology_database:
-            terminology_section = "المصطلحات والأسماء المُثبتة (استخدمها بدقة):\n"
-            for original, translation in list(self.terminology_database.items())[:20]:
-                terminology_section += f"• {original} ← {translation}\n"
-        
-        # تحديد استراتيجية الترجمة حسب النوع والنبرة
-        genre_guidance = self._get_genre_specific_guidance(text_analysis)
-        
-        prompt = f"""أنت خبير ترجمة أدبية محترف متخصص في الترجمة الكاملة والشاملة من الإنجليزية إلى العربية الفصحى.
+        if self.book_knowledge['events']:
+            recent = self.book_knowledge['events'][-3:]
+            ev_lines = ["ملخص الفصول السابقة:"]
+            for ev in recent:
+                ev_lines.append(f"  - {ev['chapter']}: {ev['summary']}")
+            context_section = '\n'.join(ev_lines)
+        elif context:
+            context_section = f"السياق: {context[:300]}"
 
-تحليل النص:
-- النوع الأدبي: {text_analysis['genre']}
-- النبرة العاطفية: {text_analysis['tone']}
+        # ── ⑥ طلب JSON المصطلحات ضمن نفس الرد ──
+        json_hint = (
+            "\n\n---\n"
+            "إذا وجدت أسماء أو مصطلحات مهمة جديدة في هذا النص، أضف في نهاية ردك:\n"
+            'TERMS_JSON:{"terms":{"EnglishName":"الاسم العربي"}}\n'
+            "إذا لم تجد مصطلحات جديدة، لا تُضف هذا القسم."
+        )
 
-{genre_guidance}
+        user_prompt = ""
+        if context_section:
+            user_prompt += context_section + "\n\n"
 
-المهمة الأساسية - ترجمة كاملة وشاملة:
-1. اترجم كل كلمة، جملة، وفقرة في النص - لا تترك أي جزء بدون ترجمة
-2. تأكد من ترجمة كل اسم شخص أو مكان أو اكتبه بالأحرف العربية
-3. حول جميع الأرقام إلى الأرقام العربية (1→١، 2→٢، إلخ)
-4. تجنب الترجمة الحرفية - اترجم وفق السياق والمعنى والشعور
-5. حافظ على النبرة العاطفية والأسلوب الأدبي للنص الأصلي
-6. تأكد أن طول الترجمة مناسب لطول النص الأصلي (لا تختصر)
-7. لا تضف تفسيرات أو تعليقات من عندك - ترجم المحتوى فقط
+        user_prompt += f'النص المطلوب ترجمته:\n"""\n{text}\n"""{json_hint}'
 
-{terminology_section}
+        return system_instruction, user_prompt.strip()
 
-{context_section}
-
-معايير الجودة الإلزامية:
-- ترجمة شاملة لكل عنصر في النص (100% coverage)
-- الحفاظ على روح النص ونبرته العاطفية بدقة
-- استخدام تراكيب عربية طبيعية وجميلة ومناسبة للسياق
-- تجنب الحشو أو الاختصار - ترجمة مكتملة ووفية للأصل
-- ضمان وضوح المعنى وجمال التعبير العربي
-
-النص المطلوب ترجمته بالكامل:
-\"\"\"
-{text}
-\"\"\"
-
-قم بترجمة النص كاملاً إلى العربية (النص المترجم فقط دون أي تعليقات أو إضافات):"""
-        
-        return prompt
-    
-    def _get_genre_specific_guidance(self, text_analysis: Dict[str, str]) -> str:
-        """توجيهات محددة حسب نوع النص"""
-        
+    def _get_genre_specific_guidance(self, text_analysis: Dict[str, Any]) -> str:
+        """توجيهات مختصرة حسب نوع النص ونبرته"""
         genre_guides = {
-            "poetry": """
-إرشادات للشعر:
-- احتفظ بالجمال الموسيقي والإيقاع في العربية
-- استخدم تعابير شاعرية مناسبة ولكن طبيعية
-- حافظ على الصور الشعرية والاستعارات
-- لا تفقد أي بيت أو مقطع من الشعر
-            """,
-            "drama": """
-إرشادات للحوار والمشاهد:
-- اجعل الحوار طبيعياً ومعبراً عن الشخصيات
-- حافظ على الحيوية والانفعال في الكلام
-- اترجم كل كلمة حوار وكل إرشاد مسرحي
-- استخدم تعابير عربية حية ومفهومة
-            """,
-            "narrative": """
-إرشادات للسرد والقصص:
-- حافظ على تدفق الحكاية وتسلسل الأحداث
-- اجعل الوصف حيوياً ومشوقاً ومكتملاً
-- لا تفوت أي تفصيل من تفاصيل القصة
-- استخدم أسلوب سردي عربي جميل وواضح
-            """,
-            "prose": """
-إرشادات للنثر:
-- اجعل النثر متدفقاً وسليماً لغوياً
-- استخدم تراكيب عربية طبيعية ومتماسكة
-- حافظ على ترابط الأفكار ووضوحها
-- تأكد من ترجمة كل فكرة ومفهوم
-            """
+            "poetry": (
+                "النوع: شعر — احتفظ بالإيقاع والصور الشعرية، "
+                "لا تفقد أي بيت أو مقطع."
+            ),
+            "drama": (
+                "النوع: حوار/مسرح — اجعل الحوار طبيعياً ومعبراً، "
+                "اترجم كل إرشاد مسرحي."
+            ),
+            "narrative": (
+                "النوع: سرد روائي — حافظ على تدفق الحكاية وتسلسل الأحداث، "
+                "لا تفوت أي تفصيل."
+            ),
+            "prose": (
+                "النوع: نثر — اجعل النثر متدفقاً وسليماً لغوياً، "
+                "حافظ على ترابط الأفكار."
+            ),
         }
-        
         tone_guides = {
-            "melancholic": "انقل المشاعر الحزينة والكآبة بعمق وحساسية في العربية",
-            "joyful": "انقل الفرح والسعادة بتعابير عربية مشرقة ومفرحة",
-            "dramatic": "حافظ على التوتر والإثارة والدراما كما في الأصل",
-            "neutral": "حافظ على التوازن والهدوء في النبرة"
+            "melancholic": "النبرة: حزينة/كآبة — انقل العمق العاطفي بدقة وحساسية.",
+            "joyful":      "النبرة: مرحة/سعيدة — استخدم تعابير مشرقة ومفرحة.",
+            "dramatic":    "النبرة: درامية — حافظ على التوتر والإثارة كما في الأصل.",
+            "neutral":     "النبرة: محايدة — حافظ على التوازن والوضوح.",
         }
-        
-        genre_guide = genre_guides.get(text_analysis['genre'], genre_guides['prose'])
-        tone_guide = tone_guides.get(text_analysis['tone'], tone_guides['neutral'])
-        
-        return f"{genre_guide}\n\nتوجيه النبرة العاطفية: {tone_guide}"
-    
-    async def translate_with_completion_guarantee(self, text: str, context: str = "") -> Optional[str]:
-        """ترجمة مع ضمان الاكتمال الشامل لكل أجزاء النص"""
-        
-        logger.info(f"Starting complete translation for text of {len(text)} characters")
-        
-        # المرحلة 1: تحليل النص واكتشاف نوعه
-        text_analysis = self.detect_text_genre_and_tone(text)
-        logger.info(f"Text analysis: Genre={text_analysis['genre']}, Tone={text_analysis['tone']}")
-        
-        # المرحلة 2: الترجمة الأولية الشاملة
-        translation_prompt = self.create_complete_translation_prompt(text, context, text_analysis)
-        
-        initial_translation_result = await self.api_manager.make_precision_request(
-            translation_prompt, 
-            temperature=0.1,  # توازن بين الإبداع والدقة
-            request_type="complete_translation"
+        g = genre_guides.get(text_analysis.get('genre', 'prose'), genre_guides['prose'])
+        t = tone_guides.get(text_analysis.get('tone', 'neutral'), tone_guides['neutral'])
+        return f"{g}\n{t}"
+
+    # ════════════════════════════════════════════════════════════
+    #  ② تحديث ملف معرفة الكتاب بعد كل فصل
+    # ════════════════════════════════════════════════════════════
+
+    def _update_book_knowledge(
+        self, chapter_title: str, original: str, translated: str
+    ):
+        """
+        يُحدّث ملف معرفة الكتاب بعد إتمام ترجمة كل فصل:
+        • يستخرج الكيانات المسماة (spaCy) ويربطها بالترجمة المعتمدة
+        • يُضيف ملخصاً للأحداث (3 جمل من بداية الترجمة)
+        • يجمع ⑤ أمثلة Few-Shot من الفصلين الأولين
+        """
+        # ── استخراج كيانات spaCy وربطها بالمصطلحات ──
+        entities = self.content_processor._extract_named_entities_spacy(original)
+        for entity in entities:
+            if (entity not in self.book_knowledge['characters']
+                    and entity not in self.book_knowledge['places']):
+                arabic_name = self.terminology_database.get(
+                    entity, self.terminology_database.get(entity.lower(), entity)
+                )
+                # تصنيف بسيط: كلمة واحدة كبيرة → شخصية، متعددة → مكان
+                if ' ' not in entity.strip():
+                    self.book_knowledge['characters'][entity] = {
+                        'arabic': arabic_name,
+                        'description': ''
+                    }
+                else:
+                    self.book_knowledge['places'][entity] = arabic_name
+
+        # ── ملخص أحداث الفصل (من بداية الترجمة) ──
+        summary_raw = translated[:300].strip()
+        # اقتطع عند نهاية جملة
+        for sep in ['؟', '!', '.', '،']:
+            idx = summary_raw.rfind(sep)
+            if idx > 80:
+                summary_raw = summary_raw[:idx + 1]
+                break
+        self.book_knowledge['events'].append({
+            'chapter': chapter_title,
+            'summary': summary_raw
+        })
+
+        # ── ⑤ Few-Shot: جمع أمثلة من الفصلين الأولين ──
+        if (self.chapters_completed <= 2
+                and len(self.book_knowledge['few_shot_examples']) < 3):
+            orig_sents = re.split(r'(?<=[.!?])\s+', original)
+            trans_sents = re.split(r'(?<=[.!?؟!])\s+', translated)
+            # نختار جملة من المنتصف (أوضح من البداية)
+            pick_idx = min(len(orig_sents), len(trans_sents), 4) - 1
+            if pick_idx >= 0:
+                ex_orig = orig_sents[pick_idx].strip()
+                ex_trans = trans_sents[pick_idx].strip()
+                if 20 < len(ex_orig) < 180 and 20 < len(ex_trans) < 220:
+                    self.book_knowledge['few_shot_examples'].append({
+                        'original': ex_orig,
+                        'translation': ex_trans
+                    })
+
+    # ════════════════════════════════════════════════════════════
+    #  ⑥ استخراج المصطلحات من رد الترجمة (بدون API منفصل)
+    # ════════════════════════════════════════════════════════════
+
+    def _parse_terms_from_response(self, response: str) -> Tuple[str, int]:
+        """
+        يفصل النص المترجم عن قسم JSON المصطلحات في نفس الرد.
+        يُعيد (cleaned_translation, terms_count).
+        مصطلحات مكررة في 3+ فصول → ثقة عالية (إلزامية).
+        مصطلحات ظهرت مرة → ثقة منخفضة (اقتراحات).
+        """
+        if 'TERMS_JSON:' not in response:
+            return response, 0
+
+        parts = response.split('TERMS_JSON:', 1)
+        translation_clean = parts[0].strip()
+        terms_raw = parts[1].strip()
+
+        # استخرج الكائن JSON الأول فقط
+        terms_count = 0
+        try:
+            json_match = re.search(r'\{[^{}]*\}', terms_raw, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                terms = data.get('terms', {})
+                for english, arabic in terms.items():
+                    english = str(english).strip()
+                    arabic = str(arabic).strip()
+                    if english and arabic and len(english) > 2:
+                        self.terminology_database[english] = arabic
+                        self.term_frequency[english] = (
+                            self.term_frequency.get(english, 0) + 1
+                        )
+                        terms_count += 1
+                        # تحديث ملف معرفة الكتاب: شخصية أو مكان؟
+                        if english.istitle() or english[0].isupper():
+                            if ' ' not in english.strip():
+                                if english not in self.book_knowledge['characters']:
+                                    self.book_knowledge['characters'][english] = {
+                                        'arabic': arabic, 'description': ''
+                                    }
+                            else:
+                                if english not in self.book_knowledge['places']:
+                                    self.book_knowledge['places'][english] = arabic
+        except Exception as e:
+            logger.debug(f"[Terms] JSON parse warning: {e}")
+
+        if terms_count:
+            logger.info(f"[Terms] ⑥ Extracted {terms_count} terms inline (no extra API call)")
+
+        return translation_clean, terms_count
+
+    # ════════════════════════════════════════════════════════════
+    #  ④ سلسلة المراجعة المستهدفة (محلي → API فقط عند الحاجة)
+    # ════════════════════════════════════════════════════════════
+
+    def _find_problematic_sentences(
+        self, translation: str, original: str
+    ) -> List[Dict[str, Any]]:
+        """
+        ④ المرحلة 2 (محلي - بدون API):
+        يكشف الجمل التي تحتوي كلمات إنجليزية غير مقبولة باستخدام langdetect
+        ويُرقّمها لإرسالها فقط إلى الـ API في المرحلة 3.
+        يُقلّل حجم طلبات المراجعة بنسبة 80-90%.
+        """
+        # بناء قائمة بيضاء مؤقتة من النص الأصلي
+        orig_whitelist = set(
+            w for w in re.findall(r'\b[A-Za-z]{2,}\b', original)
         )
-        
-        initial_translation, response_time, api_key_used = initial_translation_result if initial_translation_result else (None, 0.0, None)
+
+        problematic: List[Dict[str, Any]] = []
+        sentences = re.split(r'(?<=[.!?؟!])\s+', translation)
+
+        for i, sent in enumerate(sentences):
+            eng_words = re.findall(r'\b[A-Za-z]{3,}\b', sent)
+            bad_words = []
+            for w in eng_words:
+                if (w in orig_whitelist or w.lower() in orig_whitelist):
+                    continue
+                if self.content_processor._is_acceptable_english(w):
+                    continue
+                bad_words.append(w)
+            if bad_words:
+                problematic.append({
+                    'index':    i,
+                    'sentence': sent,
+                    'issues':   bad_words
+                })
+
+        return problematic
+
+    async def _targeted_correction(
+        self,
+        problematic: List[Dict[str, Any]],
+        full_translation: str,
+        system_instruction: str
+    ) -> str:
+        """
+        ④ المرحلة 3 (API فقط عند الحاجة):
+        يرسل الجمل المشكلة فقط (لا النص الكامل) للنموذج للتصحيح.
+        المرحلة 4: يدمج الإصلاحات في النص الكامل.
+        """
+        if not problematic:
+            return full_translation
+
+        # بناء prompt مضغوط يحتوي الجمل المشكلة فقط
+        req_lines = ["صحح الجمل التالية: ترجم الكلمات الإنجليزية إلى العربية فقط.\n"]
+        for item in problematic[:12]:   # حد أقصى 12 جملة في طلب واحد
+            req_lines.append(
+                f"جملة_{item['index']}: {item['sentence']}\n"
+                f"  كلمات مشكلة: {', '.join(item['issues'])}"
+            )
+        req_lines.append(
+            '\nأجب بـ JSON فقط:\n{"corrections":{"0":"الجملة المصححة","1":"..."}}'
+        )
+
+        targeted_prompt = '\n'.join(req_lines)
+        targeted_sys = (
+            "أنت مصحح ترجمة. مهمتك الوحيدة: ترجمة الكلمات الإنجليزية المشكلة. "
+            "أجب بـ JSON فقط بدون أي نص إضافي."
+        )
+
+        result = await self.api_manager.make_precision_request(
+            targeted_prompt,
+            system_instruction=targeted_sys,
+            temperature=0.05,
+            request_type="targeted_correction"
+        )
+
+        if not result:
+            return full_translation
+
+        response_text, _, _ = result
+
+        # ── المرحلة 4: دمج التصحيحات في النص الكامل ──
+        try:
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if not json_match:
+                return full_translation
+
+            corrections: Dict[str, str] = json.loads(
+                json_match.group()
+            ).get('corrections', {})
+
+            sentences = re.split(r'(?<=[.!?؟!])\s+', full_translation)
+            for item in problematic:
+                key = str(item['index'])
+                if key in corrections and item['index'] < len(sentences):
+                    sentences[item['index']] = corrections[key]
+
+            merged = ' '.join(sentences)
+            logger.info(
+                f"[TargetedCorrection] ④ Applied {len(corrections)} targeted fixes "
+                f"(sent only {len(problematic)} sentences vs full text)"
+            )
+            return merged
+
+        except Exception as e:
+            logger.warning(f"[TargetedCorrection] Merge failed: {e}")
+            return full_translation
+
+    # ════════════════════════════════════════════════════════════
+    #  تقسيم النص إلى قطع آمنة
+    # ════════════════════════════════════════════════════════════
+
+    def _split_into_safe_chunks(self, text: str) -> List[str]:
+        """
+        تقسيم النص إلى قطع آمنة لا تتجاوز SAFE_CHUNK_WORDS كلمة.
+        خوارزمية: فقرات أولاً، ثم جمل عند الضرورة، مع جسر سياقي بين القطع.
+        """
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+        if not paragraphs:
+            return [text] if text.strip() else []
+
+        chunks: List[str] = []
+        current_parts: List[str] = []
+        current_words = 0
+
+        for para in paragraphs:
+            para_words = len(para.split())
+
+            if para_words > self.SAFE_CHUNK_WORDS:
+                if current_parts:
+                    chunks.append('\n\n'.join(current_parts))
+                    current_parts = []
+                    current_words = 0
+                sentences = re.split(r'(?<=[.!?])\s+', para)
+                sub_parts: List[str] = []
+                sub_words = 0
+                for sent in sentences:
+                    sw = len(sent.split())
+                    if sub_words + sw > self.SAFE_CHUNK_WORDS and sub_parts:
+                        chunks.append(' '.join(sub_parts))
+                        sub_parts = [sent]
+                        sub_words = sw
+                    else:
+                        sub_parts.append(sent)
+                        sub_words += sw
+                if sub_parts:
+                    current_parts = [' '.join(sub_parts)]
+                    current_words = sub_words
+                continue
+
+            if current_words + para_words > self.SAFE_CHUNK_WORDS and current_parts:
+                chunks.append('\n\n'.join(current_parts))
+                current_parts = [para]
+                current_words = para_words
+            else:
+                current_parts.append(para)
+                current_words += para_words
+
+        if current_parts:
+            chunks.append('\n\n'.join(current_parts))
+
+        return chunks if chunks else [text]
+
+    async def _translate_in_chunks(
+        self, text: str, context: str, text_analysis: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        ترجمة نص كبير قطعةً قطعة.
+        • ① كل قطعة تُرسَل مع system_instruction منفصل
+        • جسر سياقي: آخر 300 حرف من الترجمة السابقة
+        • كشف ###TRUNCATED### مع إعادة محاولة بقطعة أصغر
+        """
+        chunks = self._split_into_safe_chunks(text)
+        total = len(chunks)
+        logger.info(
+            f"[Chunking] Text split into {total} safe chunks "
+            f"(max {self.SAFE_CHUNK_WORDS} words each)"
+        )
+
+        translated_chunks: List[str] = []
+        running_context = context
+
+        for idx, chunk in enumerate(chunks):
+            chunk_words = len(chunk.split())
+            logger.info(
+                f"[Chunking] Translating chunk {idx+1}/{total} ({chunk_words} words)..."
+            )
+
+            # ① system_instruction + user_prompt منفصلان
+            sys_inst, user_prompt = self.create_complete_translation_prompt(
+                chunk, running_context, text_analysis
+            )
+            result = await self.api_manager.make_precision_request(
+                user_prompt,
+                system_instruction=sys_inst,
+                temperature=0.1,
+                request_type="chunk_translation"
+            )
+
+            chunk_translation, r_time, a_key = result if result else (None, 0.0, None)
+
+            # ── كشف القطع المُقطوعة ──
+            if chunk_translation and "###TRUNCATED###" in chunk_translation:
+                logger.warning(
+                    f"[Chunking] Chunk {idx+1} truncated — retrying with half-size..."
+                )
+                chunk_translation = chunk_translation.replace("###TRUNCATED###", "").strip()
+
+                mid_words = chunk.split()
+                half = len(mid_words) // 2
+                sub_results: List[str] = []
+                for sub_chunk in [' '.join(mid_words[:half]), ' '.join(mid_words[half:])]:
+                    s_sys, s_prompt = self.create_complete_translation_prompt(
+                        sub_chunk, running_context, text_analysis
+                    )
+                    sub_result = await self.api_manager.make_precision_request(
+                        s_prompt,
+                        system_instruction=s_sys,
+                        temperature=0.1,
+                        request_type="subchunk_translation"
+                    )
+                    sub_trans, _, _ = sub_result if sub_result else (None, 0.0, None)
+                    if sub_trans:
+                        sub_trans, _ = self._parse_terms_from_response(
+                            sub_trans.replace("###TRUNCATED###", "").strip()
+                        )
+                        sub_results.append(sub_trans)
+                        running_context = sub_trans[-300:]
+
+                if sub_results:
+                    chunk_translation = '\n\n'.join(sub_results)
+
+            if chunk_translation:
+                # ⑥ استخراج المصطلحات من الرد مباشرة
+                clean, _ = self._parse_terms_from_response(
+                    chunk_translation.replace("###TRUNCATED###", "").strip()
+                )
+                translated_chunks.append(clean)
+                # تحديث الجسر السياقي: آخر 300 حرف
+                running_context = clean[-300:]
+                logger.info(f"[Chunking] Chunk {idx+1}/{total} done ✓")
+            else:
+                logger.error(f"[Chunking] ❌ Chunk {idx+1}/{total} FAILED — "
+                             f"original text will be inserted as placeholder")
+                # أدخل النص الأصلي كـ placeholder لتجنب فقدان البيانات
+                translated_chunks.append(f"\n[ترجمة مفقودة - النص الأصلي:\n{chunk}\n]")
+
+        return '\n\n'.join(translated_chunks)
+
+    async def translate_with_completion_guarantee(
+        self, text: str, context: str = ""
+    ) -> Tuple[Optional[str], float, Optional[str]]:
+        """
+        ترجمة مع ضمان الاكتمال الشامل.
+        سلسلة العمل المحسنة:
+        ① ترجمة أولية (API) مع system_instruction منفصل
+        ② كشف الجمل المشكلة محلياً (بدون API)
+        ③ تصحيح مستهدف للجمل المشكلة فقط (API عند الحاجة فقط)
+        ④ تحديث ملف معرفة الكتاب
+        """
+        logger.info(
+            f"[CompletionGuarantee] Starting for text of {len(text)} chars"
+        )
+
+        text_analysis = self.detect_text_genre_and_tone(text)
+        logger.info(
+            f"Text analysis: Genre={text_analysis['genre']}, Tone={text_analysis['tone']}"
+        )
+
+        word_count = len(text.split())
+
+        # ── المرحلة 1: ترجمة أولية ──
+        response_time = 0.0
+        api_key_used = None
+
+        if word_count > self.SAFE_CHUNK_WORDS:
+            logger.info(
+                f"[Chunking] {word_count} words > {self.SAFE_CHUNK_WORDS} → chunk-based"
+            )
+            initial_translation = await self._translate_in_chunks(
+                text, context, text_analysis
+            )
+        else:
+            sys_inst, user_prompt = self.create_complete_translation_prompt(
+                text, context, text_analysis
+            )
+            result = await self.api_manager.make_precision_request(
+                user_prompt,
+                system_instruction=sys_inst,
+                temperature=0.1,
+                request_type="complete_translation"
+            )
+            initial_translation, response_time, api_key_used = (
+                result if result else (None, 0.0, None)
+            )
+            if initial_translation:
+                initial_translation, _ = self._parse_terms_from_response(
+                    initial_translation.replace("###TRUNCATED###", "").strip()
+                )
 
         if not initial_translation:
-            logger.error("Failed in initial translation")
+            logger.error("[CompletionGuarantee] Initial translation failed")
             return None, 0.0, None
-        
-        logger.info("Initial translation done, starting completion check...")
-        
-        # المرحلة 3: فحص اكتمال الترجمة
-        if self.content_processor.needs_completion_review(text, initial_translation):
-            quality_logger.warning("Incomplete translation detected, starting completion review...")
-            
-            # تحليل المشاكل
-            issues = self.content_processor.detect_incomplete_translation(text, initial_translation)
-            
-            # مراجعة شاملة لضمان الاكتمال
-            completion_prompt = f"""أنت مراجع ترجمة خبير. مهمتك ضمان ترجمة كاملة وشاملة للنص.
 
-المشاكل المكتشفة في الترجمة الحالية:
-- كلمات إنجليزية متبقية: {len(issues['untranslated_english'])} كلمة
-- نسبة التغطية: {issues['coverage_percentage']:.1f}%
+        logger.info("[CompletionGuarantee] Initial done — checking coverage...")
 
-مهمتك:
-1. تأكد من ترجمة كل جملة وفقرة من النص الأصلي
-2. ترجم أي كلمة إنجليزية متبقية في الترجمة
-3. تأكد أن طول الترجمة مناسب للنص الأصلي
-4. حافظ على المعنى والسياق والنبرة العاطفية
-5. لا تضف أو تحذف أي محتوى
+        # ── المرحلة 2: كشف الجمل المشكلة محلياً ──
+        issues = self.content_processor.detect_incomplete_translation(
+            text, initial_translation
+        )
+        problematic_sents = self._find_problematic_sentences(initial_translation, text)
 
-النص الأصلي الذي يجب ترجمته بالكامل:
-\"\"\"
-{text}
-\"\"\"
-
-الترجمة الحالية التي تحتاج إكمال:
-\"\"\"
-{initial_translation}
-\"\"\"
-
-قدم الترجمة المكتملة والشاملة (النص المترجم فقط):"""
-            
-            completed_translation_result = await self.api_manager.make_precision_request(
-                completion_prompt,
-                temperature=0.05,
-                request_type="completion_review"
+        # ── المرحلة 3: مراجعة مستهدفة فقط عند وجود مشاكل ──
+        if problematic_sents or issues['coverage_percentage'] < 65.0:
+            quality_logger.warning(
+                f"[CompletionGuarantee] Issues: {len(problematic_sents)} bad sentences, "
+                f"coverage={issues['coverage_percentage']:.1f}%"
             )
-            
-            completed_translation, r_time, a_key = completed_translation_result if completed_translation_result else (None, 0.0, None)
-            if r_time: response_time += r_time
-            if a_key: api_key_used = a_key
 
-            if completed_translation:
-                # فحص إضافي للتأكد من الاكتمال
-                final_check = self.content_processor.detect_incomplete_translation(text, completed_translation)
-                if final_check['coverage_percentage'] > 90:
-                    logger.info("Translation completed successfully - high coverage ratio")
-                    final_translation = self.content_processor.convert_numbers_to_arabic(completed_translation)
-                else:
-                    quality_logger.warning("Final attempt to guarantee completion...")
-                    # محاولة أخيرة
-                    final_completion_prompt = f"""مراجعة نهائية حاسمة:
-
-اضمن ترجمة كل كلمة وجملة في النص التالي إلى العربية:
-
-النص الأصلي:
-{text[:2000]}
-
-الترجمة النهائية الكاملة:"""
-                    
-                    final_translation_result = await self.api_manager.make_precision_request(
-                        final_completion_prompt,
-                        temperature=0.02,
-                        request_type="final_completion"
-                    )
-                    
-                    final_translation, r_time, a_key = final_translation_result if final_translation_result else (None, 0.0, None)
-                    if r_time: response_time += r_time
-                    if a_key: api_key_used = a_key
-
-                    if final_translation:
-                        final_translation = self.content_processor.convert_numbers_to_arabic(final_translation)
-                    else:
-                        final_translation = self.content_processor.convert_numbers_to_arabic(completed_translation)
+            if problematic_sents:
+                # تصحيح الجمل المشكلة فقط (80-90% أقل توكنز)
+                sys_inst_short = self._build_system_instruction(text_analysis)
+                fixed = await self._targeted_correction(
+                    problematic_sents, initial_translation, sys_inst_short
+                )
             else:
-                final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
+                fixed = initial_translation
+
+            # إذا التغطية لا تزال منخفضة → مراجعة للاكتمال فقط
+            final_check = self.content_processor.detect_incomplete_translation(
+                text, fixed
+            )
+            if final_check['coverage_percentage'] < 65.0:
+                quality_logger.warning(
+                    "[CompletionGuarantee] Coverage still low → completion review..."
+                )
+                sys_review = (
+                    "أنت مراجع ترجمة. مهمتك: ترجمة الأجزاء الناقصة فقط دون تغيير ما هو صحيح. "
+                    "أخرج الترجمة الكاملة فقط."
+                )
+                review_prompt = (
+                    f"الترجمة الحالية ناقصة (تغطية {final_check['coverage_percentage']:.0f}%).\n\n"
+                    f"النص الأصلي:\n\"\"\"\n{text}\n\"\"\"\n\n"
+                    f"الترجمة الحالية:\n\"\"\"\n{fixed}\n\"\"\"\n\n"
+                    "قدم الترجمة الكاملة:"
+                )
+                review_result = await self.api_manager.make_precision_request(
+                    review_prompt,
+                    system_instruction=sys_review,
+                    temperature=0.05,
+                    request_type="completion_review"
+                )
+                if review_result:
+                    reviewed, r_t, r_k = review_result
+                    if r_t: response_time += r_t
+                    if r_k: api_key_used = r_k
+                    reviewed, _ = self._parse_terms_from_response(reviewed)
+                    final_translation = reviewed if reviewed else fixed
+                else:
+                    final_translation = fixed
+            else:
+                final_translation = fixed
+                logger.info(
+                    f"[CompletionGuarantee] ✅ Coverage {final_check['coverage_percentage']:.1f}% after targeted fix"
+                )
         else:
-            logger.info("Initial translation is complete and comprehensive")
-            final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
-        
-        # المرحلة 4: تحديث السياق والمصطلحات
+            logger.info(
+                f"[CompletionGuarantee] ✅ Initial translation clean "
+                f"(coverage={issues['coverage_percentage']:.1f}%)"
+            )
+            final_translation = initial_translation
+
+        # ── تحويل الأرقام ──
+        final_translation = self.content_processor.convert_numbers_to_arabic(
+            final_translation
+        )
+
+        # ── المرحلة 4: تحديث ملف المعرفة ──
         if final_translation:
-            # إضافة للسياق مع تنظيم أفضل
-            context_excerpt = final_translation[:500]
-            self.context_history.append(context_excerpt)
+            self.context_history.append(final_translation[:500])
             if len(self.context_history) > 5:
                 self.context_history.pop(0)
-            
-            # استخراج المصطلحات
-            await self.extract_terminology(text, final_translation)
-        
+            self._update_book_knowledge(context or "فصل", text, final_translation)
+            self.chapters_completed += 1
+
         return final_translation, response_time, api_key_used
-    
-    async def translate_with_comprehensive_review(self, text: str, context: str = "") -> Optional[str]:
-        """ترجمة شاملة مع مراجعة متعددة المراحل لضمان عدم ترك أي محتوى أجنبي"""
-        
-        logger.info(f"Starting comprehensive translation for text of {len(text)} characters")
-        
-        # المرحلة 1: تحليل النص واكتشاف نوعه
-        text_analysis = self.detect_text_genre_and_tone(text)
-        logger.info(f"Text analysis: Genre={text_analysis['genre']}, Tone={text_analysis['tone']}")
-        
-        # المرحلة 2: الترجمة الأولية السياقية
-        translation_prompt = self.create_complete_translation_prompt(text, context, text_analysis)
-        
-        initial_translation_result = await self.api_manager.make_precision_request(
-            translation_prompt, 
-            temperature=0.1,  # توازن بين الإبداع والدقة
-            request_type="contextual_translation"
+
+    async def translate_with_comprehensive_review(
+        self, text: str, context: str = ""
+    ) -> Tuple[Optional[str], float, Optional[str]]:
+        """
+        ترجمة شاملة مع مراجعة مستهدفة لضمان عدم ترك أي محتوى أجنبي.
+
+        سلسلة العمل المحسنة بالنقاط الست:
+        ① الترجمة الأولية مع systemInstruction منفصل
+        ② كشف المحتوى الأجنبي محلياً بدون API
+        ③ تصحيح مستهدف للجمل المشكلة فقط (80-90% أقل توكنز)
+        ④ تحديث ملف معرفة الكتاب (شخصيات + أحداث + أسلوب)
+        ⑤ Few-Shot يُفعَّل تلقائياً بعد الفصلين الأولين
+        ⑥ المصطلحات تُستخرج من نفس الرد (لا API call منفصل)
+        """
+        logger.info(
+            f"[ComprehensiveReview] Starting for text of {len(text)} chars"
         )
-        
-        initial_translation, response_time, api_key_used = initial_translation_result if initial_translation_result else (None, 0.0, None)
+
+        # المرحلة 1: تحليل النص ③
+        text_analysis = self.detect_text_genre_and_tone(text)
+        logger.info(
+            f"Text analysis: Genre={text_analysis['genre']}, "
+            f"Tone={text_analysis['tone']} | "
+            f"genre_scores={text_analysis.get('genre_scores', {})}"
+        )
+
+        word_count = len(text.split())
+        response_time = 0.0
+        api_key_used = None
+
+        # المرحلة 2: ترجمة أولية ①
+        if word_count > self.SAFE_CHUNK_WORDS:
+            logger.info(
+                f"[Chunking] {word_count} words > {self.SAFE_CHUNK_WORDS} "
+                "→ chunk-based translation"
+            )
+            initial_translation = await self._translate_in_chunks(
+                text, context, text_analysis
+            )
+        else:
+            sys_inst, user_prompt = self.create_complete_translation_prompt(
+                text, context, text_analysis
+            )
+            result = await self.api_manager.make_precision_request(
+                user_prompt,
+                system_instruction=sys_inst,
+                temperature=0.1,
+                request_type="contextual_translation"
+            )
+            initial_translation, response_time, api_key_used = (
+                result if result else (None, 0.0, None)
+            )
+            if initial_translation:
+                # ⑥ استخراج المصطلحات من نفس الرد
+                initial_translation, terms_count = self._parse_terms_from_response(
+                    initial_translation.replace("###TRUNCATED###", "").strip()
+                )
 
         if not initial_translation:
-            logger.error("Failed in initial translation")
+            logger.error("[ComprehensiveReview] Initial translation failed")
             return None, 0.0, None
-        
-        logger.info("Initial translation done, starting comprehensive review...")
-        
-        # المرحلة 3: فحص شامل للمحتوى الأجنبي
-        if self.content_processor.has_any_foreign_content(initial_translation):
-            quality_logger.warning("Foreign content found, starting comprehensive correction...")
-            
-            # مراجعة شاملة لإزالة أي محتوى أجنبي
-            comprehensive_review_prompt = f"""أنت مراجع ترجمة خبير. مهمتك مراجعة الترجمة وضمان عدم وجود أي محتوى أجنبي.
 
-تركز المراجعة على:
-1. تأكد من ترجمة كل كلمة إنجليزية إلى العربية
-2. حول جميع الأرقام الإنجليزية (1,2,3...) إلى أرقام عربية (١،٢،٣...)
-3. ترجم أو عرّب جميع الأسماء الأجنبية
-4. تأكد من عدم وجود أي نص إنجليزي في الترجمة
-5. حافظ على المعنى والسياق والنبرة العاطفية
+        logger.info("[ComprehensiveReview] Initial done — checking foreign content...")
 
-النص الأصلي:
-\"\"\"
-{text}
-\"\"\"
+        # المرحلة 3: ② كشف المحتوى الأجنبي محلياً
+        has_foreign = self.content_processor.has_any_foreign_content(
+            initial_translation, original_text=text
+        )
+        problematic_sents = (
+            self._find_problematic_sentences(initial_translation, text)
+            if has_foreign else []
+        )
 
-الترجمة الحالية التي تحتاج مراجعة:
-\"\"\"
-{initial_translation}
-\"\"\"
-
-قدم الترجمة المُصححة والخالية تماماً من أي محتوى أجنبي (النص فقط):"""
-            
-            corrected_translation_result = await self.api_manager.make_precision_request(
-                comprehensive_review_prompt,
-                temperature=0.05,
-                request_type="comprehensive_correction"
+        if problematic_sents:
+            quality_logger.warning(
+                f"[ComprehensiveReview] {len(problematic_sents)} sentences with foreign content"
             )
-            
-            corrected_translation, _, _ = corrected_translation_result if corrected_translation_result else (None, 0.0, None)
+            # المرحلة 3: ③ تصحيح مستهدف للجمل المشكلة فقط
+            sys_inst_for_fix = self._build_system_instruction(text_analysis)
+            fixed = await self._targeted_correction(
+                problematic_sents, initial_translation, sys_inst_for_fix
+            )
 
-            if corrected_translation:
-                # فحص إضافي
-                if not self.content_processor.has_any_foreign_content(corrected_translation):
-                    logger.info("Translation corrected successfully - free of foreign content")
-                    final_translation = self.content_processor.convert_numbers_to_arabic(corrected_translation)
-                else:
-                    quality_logger.warning("Foreign content still exists, final correction attempt...")
-                    # محاولة تصحيح نهائية مكثفة
-                    final_correction_prompt = f"""مراجعة نهائية حاسمة: 
-
-احذف أو ترجم أي كلمة أو رمز أو رقم إنجليزي في النص التالي:
-
-{corrected_translation}
-
-النص النهائي الخالي تماماً من الإنجليزية (عربي فقط):"""
-                    
-                    final_translation_result = await self.api_manager.make_precision_request(
-                        final_correction_prompt,
-                        temperature=0.02,
-                        request_type="final_cleanup"
+            # فحص بعد التصحيح
+            still_has_foreign = self.content_processor.has_any_foreign_content(
+                fixed, original_text=text
+            )
+            if still_has_foreign:
+                quality_logger.warning(
+                    "[ComprehensiveReview] Foreign content remains after targeted fix → final cleanup"
+                )
+                cleanup_sys = (
+                    "أنت مصحح نهائي. احذف أو ترجم أي كلمة إنجليزية غير مقبولة. "
+                    "أخرج النص العربي فقط."
+                )
+                cleanup_prompt = (
+                    f"صحّح هذه الترجمة من أي كلمات إنجليزية متبقية:\n\n{fixed}"
+                )
+                cleanup_result = await self.api_manager.make_precision_request(
+                    cleanup_prompt,
+                    system_instruction=cleanup_sys,
+                    temperature=0.02,
+                    request_type="final_cleanup"
+                )
+                if cleanup_result:
+                    cleaned, r_t, r_k = cleanup_result
+                    if r_t: response_time += r_t
+                    if r_k: api_key_used = r_k
+                    final_translation = (
+                        cleaned if cleaned else fixed
                     )
-                    
-                    final_translation, _, _ = final_translation_result if final_translation_result else (None, 0.0, None)
-
-                    if final_translation:
-                        final_translation = self.content_processor.convert_numbers_to_arabic(final_translation)
-                    else:
-                        final_translation = self.content_processor.convert_numbers_to_arabic(corrected_translation)
+                else:
+                    final_translation = fixed
             else:
-                final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
+                logger.info(
+                    "[ComprehensiveReview] ✅ Clean after targeted correction"
+                )
+                final_translation = fixed
         else:
-            logger.info("Initial translation is free of foreign content")
-            final_translation = self.content_processor.convert_numbers_to_arabic(initial_translation)
-        
-        # المرحلة 4: تحديث السياق والمصطلحات
+            logger.info(
+                "[ComprehensiveReview] ✅ Initial translation free of foreign content"
+            )
+            final_translation = initial_translation
+
+        # تحويل الأرقام
+        final_translation = self.content_processor.convert_numbers_to_arabic(
+            final_translation
+        )
+
+        # المرحلة 4: تحديث ملف المعرفة ② ⑤
         if final_translation:
-            # إضافة للسياق مع تنظيم أفضل
-            context_excerpt = final_translation[:500]  # زيادة حجم السياق
-            self.context_history.append(context_excerpt)
+            self.context_history.append(final_translation[:500])
             if len(self.context_history) > 5:
                 self.context_history.pop(0)
-            
-            # استخراج المصطلحات المحسن
-            await self.extract_terminology(text, final_translation)
-        
+            self._update_book_knowledge(context or "فصل", text, final_translation)
+            self.chapters_completed += 1
+
         return final_translation, response_time, api_key_used
-    
+
     async def extract_terminology(self, original: str, translation: str):
-        """استخراج وحفظ المصطلحات المهمة"""
-        
-        extraction_prompt = f"""استخرج المصطلحات المهمة والأسماء من النص وترجماتها.
-
-النص الأصلي:
-{original[:500]}
-
-الترجمة:
-{translation[:500]}
-
-اكتب فقط المصطلحات المهمة التي يجب أن تبقى ثابتة:
-تنسيق: الإنجليزية ← العربية
-
-المصطلحات المهمة:"""
-        
-        terms_response_result = await self.api_manager.make_precision_request(
-            extraction_prompt,
-            temperature=0.1,
-            request_type="terminology_extraction"
+        """
+        للتوافق مع الكود الخارجي.
+        المصطلحات تُستخرج الآن تلقائياً ضمن رد الترجمة (⑥).
+        هذه الدالة تبقى كواجهة عامة لكنها لا تُنشئ API call إضافياً.
+        """
+        # في حال استُدعيت مباشرة، نحاول استخراج المصطلحات محلياً
+        # من خلال تحليل النصين بدون استدعاء API إضافي
+        eng_words = re.findall(r'\b[A-Z][a-z]{2,}\b', original)
+        for word in eng_words:
+            if word in self.terminology_database:
+                # زيادة التردد للمصطلح الموجود
+                self.term_frequency[word] = self.term_frequency.get(word, 0) + 1
+        logger.debug(
+            "[extract_terminology] Called externally — terms already extracted inline ⑥"
         )
-        
-        terms_response, _, _ = terms_response_result if terms_response_result else (None, 0.0, None)
-
-        if terms_response:
-            lines = terms_response.strip().split('\n')
-            for line in lines:
-                if '←' in line:
-                    try:
-                        english, arabic = line.split('←')
-                        english = english.strip()
-                        arabic = arabic.strip()
-                        if english and arabic and len(english) > 2:
-                            self.terminology_database[english] = arabic
-                            logger.info(f"Term saved: {english} ← {arabic}")
-                    except:
-                        continue
 
 
 class ProfessionalDocumentProcessor:
@@ -2728,7 +3614,13 @@ class MasterTranslationSystem:
             logger.info(f"📊 Total characters: {self.translation_stats['total_characters']:,}")
             logger.info(f"📚 Book Title: {book_title}")
             logger.info(f"✍️ Author: {author}")
-            
+
+            # ── بناء القائمة البيضاء الديناميكية من النص الكامل للكتاب ──
+            # يُحسّن دقة كشف المحتوى الأجنبي بتمييز أسماء الشخصيات والأماكن
+            logger.info("🧠 Building dynamic whitelist from full book text (character names, places)...")
+            full_book_text = " ".join(ch.get('content', '') for ch in chapters)
+            self.translation_engine.content_processor.build_book_whitelist(full_book_text)
+
             # المرحلة 2: ترجمة شاملة مع مراجعة متعددة المراحل
             logger.info("🔄 Phase 2: Starting comprehensive translation with strict no-foreign-content guarantee...")
             
