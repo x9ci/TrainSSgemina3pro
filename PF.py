@@ -37,6 +37,7 @@ import asyncio
 import aiohttp
 import time
 import structlog
+import pybreaker
 from rich.console import Console
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
 from rich.logging import RichHandler
@@ -812,6 +813,20 @@ class KeyStatistics:
             for canonical in self.FAILURE_TYPES
         }
 
+# ============= استثناء داخلي لـ Circuit Breaker =============
+class _CircuitBreakerKeyError(Exception):
+    """
+    استثناء داخلي يُرفع داخل _api_call ليُحسب ضمن فشل Circuit Breaker.
+    يُمثّل فشلاً حقيقياً في المفتاح (server error، invalid key، network error).
+    لا يُستخدم لأخطاء Rate Limit (429) التي تُعالج بـ blocked_keys.
+    """
+    def __init__(self, status: int = 0, message: str = "", error_type: str = "general"):
+        self.status     = status
+        self.message    = message
+        self.error_type = error_type
+        super().__init__(f"[{status}] {message}")
+
+
 # ============= الفئة المحسنة الرئيسية (مع المفاتيح كما هي) =============
 class EnhancedGeminiAPI:
     """إدارة محسنة لـ Gemini API مع مفاتيح متعددة"""
@@ -861,6 +876,40 @@ class EnhancedGeminiAPI:
         self.session = None
         
         logger.info(f"Gemini API initialized with {len(self.api_keys)} keys")
+
+        # ---- Generation Profiles: إعدادات توليد مخصصة حسب نوع الطلب ----
+        # temperature يأتي من المستدعي؛ هنا نضبط topK و topP بدقة حسب النوع
+        self.GENERATION_PROFILES: Dict[str, Dict[str, Any]] = {
+            # الترجمة الأدبية والسياقية — تنوع عالٍ لضمان جودة أسلوبية
+            "translation":               {"topK": 20, "topP": 0.9},
+            "complete_translation":      {"topK": 20, "topP": 0.9},
+            "contextual_translation":    {"topK": 20, "topP": 0.9},
+            "chapter_title_translation": {"topK": 20, "topP": 0.9},
+            # استخراج المصطلحات — دقة عالية، تنوع منخفض
+            "terminology_extraction":    {"topK": 10, "topP": 0.7},
+            "term_extraction":           {"topK": 10, "topP": 0.7},
+            # المراجعة والتصحيح النهائي — أقصى دقة وأدنى عشوائية
+            "completion_review":         {"topK": 8,  "topP": 0.6},
+            "comprehensive_correction":  {"topK": 8,  "topP": 0.6},
+            "final_completion":          {"topK": 8,  "topP": 0.6},
+            "final_cleanup":             {"topK": 8,  "topP": 0.6},
+            "final_review":              {"topK": 8,  "topP": 0.6},
+        }
+        # الإعدادات الافتراضية لأي نوع طلب غير مصنَّف
+        self._default_profile: Dict[str, Any] = {"topK": 12, "topP": 0.8}
+
+        # ---- Circuit Breakers: واحد لكل مفتاح ----
+        # بعد 5 فشل حقيقي متتالٍ → يُوقَف المفتاح 5 دقائق (300 ثانية)
+        # ثم يدخل HALF-OPEN: طلب واحد للاختبار، إن نجح → CLOSED، وإلا → OPEN من جديد
+        self.circuit_breakers: Dict[str, pybreaker.CircuitBreaker] = {
+            key: pybreaker.CircuitBreaker(
+                fail_max=5,
+                reset_timeout=300,
+                name=f"cb_{key[:10]}"
+            )
+            for key in self.api_keys
+        }
+        logger.info(f"Circuit Breakers initialized: {len(self.circuit_breakers)} breakers (fail_max=5, timeout=300s)")
     
     async def _ensure_session(self):
         """التأكد من وجود جلسة HTTP نشطة مع connection pooling"""
@@ -893,6 +942,13 @@ class EnhancedGeminiAPI:
         """تقدير دقيق لعدد التوكنز: يدعم tiktoken للعربية والإنجليزية."""
         return _estimate_tokens_smart(text)
 
+    def _get_generation_profile(self, request_type: str) -> Dict[str, Any]:
+        """
+        إرجاع إعدادات topK و topP المناسبة لنوع الطلب.
+        تعود إلى الإعدادات الافتراضية إذا لم يكن النوع معروفاً.
+        """
+        return self.GENERATION_PROFILES.get(request_type, self._default_profile)
+
     async def get_optimal_api_key(self, estimated_tokens: int = 0) -> Optional[str]:
         """الحصول على المفتاح التالي المتاح باستخدام Round-Robin مع انتظار ذكي"""
         while True:
@@ -913,6 +969,16 @@ class EnhancedGeminiAPI:
                 # تخطي المفاتيح المحظورة
                 if key in self.blocked_keys:
                     continue
+
+                # تخطي المفاتيح التي فتح دائرتها (Circuit Breaker OPEN)
+                cb = self.circuit_breakers.get(key)
+                if cb is not None:
+                    try:
+                        cb_state = str(cb.current_state).lower()
+                        if "open" in cb_state and "half" not in cb_state:
+                            continue
+                    except Exception:
+                        pass
 
                 # التحقق من rate limit
                 if not self.rate_limiters[key].can_make_request(estimated_tokens):
@@ -960,15 +1026,26 @@ class EnhancedGeminiAPI:
     async def make_precision_request(self, prompt: str, system_instruction: str = "", 
                                    temperature: float = 0.05, max_tokens: int = 8192,
                                    request_type: str = "translation") -> Optional[str]:
-        """إرسال طلب دقيق مع إعدادات محسنة"""
-        
+        """
+        إرسال طلب دقيق مع تحسينات شاملة:
+          ✅ systemInstruction كحقل مستقل في payload (وزن أعلى لدى النموذج)
+          ✅ إعدادات توليد مخصصة (topK، topP) حسب نوع الطلب
+          ✅ maxOutputTokens يُحسب ديناميكياً من طول النص المُدخَل
+          ✅ Circuit Breaker لكل مفتاح (5 فشل → إيقاف 5 دقائق ثم اختبار واحد)
+        """
         # التأكد من وجود جلسة نشطة
         await self._ensure_session()
-        
-        # تقدير عدد التوكنز للطلب والإجابة المتوقعة
+
+        # --- حساب التوكنز وإعداد maxOutputTokens ديناميكياً ---
+        # input_tokens فقط من الـ prompt الحقيقي (system_instruction يسهم بشكل منفصل)
         estimated_input_tokens = self.estimate_tokens(prompt + system_instruction)
-        estimated_output_tokens = min(max_tokens, estimated_input_tokens * 2) # افتراض أقصى
-        total_estimated_tokens = estimated_input_tokens + estimated_output_tokens
+        # الإخراج العربي ≈ 1.5× المدخلات، حد أدنى 1024، لا يتجاوز max_tokens المُمرَّر
+        dynamic_max_tokens = min(max_tokens, max(1024, int(estimated_input_tokens * 1.5)))
+        estimated_output_tokens = dynamic_max_tokens
+        total_estimated_tokens  = estimated_input_tokens + estimated_output_tokens
+
+        # --- profile للتوليد حسب نوع الطلب ---
+        profile = self._get_generation_profile(request_type)
 
         for attempt in range(self.max_retries):
             api_key = await self.get_optimal_api_key(total_estimated_tokens)
@@ -985,122 +1062,164 @@ class EnhancedGeminiAPI:
                 'User-Agent': 'Professional-Translation-System/Enhanced'
             }
             
-            # نفس الإعدادات الأصلية مع تحسينات طفيفة
-            payload = {
+            # --- بناء الـ payload مع systemInstruction كحقل مستقل ---
+            payload: Dict[str, Any] = {
                 "contents": [
                     {
-                        "parts": [
-                            {
-                                "text": f"{system_instruction}\n\n{prompt}"
-                            }
-                        ]
+                        "role": "user",
+                        "parts": [{"text": prompt}]
                     }
                 ],
                 "generationConfig": {
-                    "temperature": temperature,
-                    "topK": 12,
-                    "topP": 0.8,
-                    "maxOutputTokens": max_tokens,
-                    "candidateCount": 1,
-                    "stopSequences": ["###TRANSLATION_END###", "###END###"]
+                    "temperature":      temperature,
+                    "topK":             profile["topK"],
+                    "topP":             profile["topP"],
+                    "maxOutputTokens":  dynamic_max_tokens,
+                    "candidateCount":   1,
+                    "stopSequences":    ["###TRANSLATION_END###", "###END###"]
                 },
                 "safetySettings": [
-                    {
-                        "category": "HARM_CATEGORY_HARASSMENT",
-                        "threshold": "BLOCK_NONE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_HATE_SPEECH",
-                        "threshold": "BLOCK_NONE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_NONE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        "threshold": "BLOCK_NONE"
-                    }
+                    {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
                 ]
             }
-            
+            # إضافة systemInstruction كحقل مستقل فقط إذا كان غير فارغ
+            if system_instruction and system_instruction.strip():
+                payload["systemInstruction"] = {
+                    "parts": [{"text": system_instruction.strip()}]
+                }
+
             url = f"{self.base_url}?key={api_key}"
-            
-            try:
-                logger.info(f"Sending {request_type} request for attempt {attempt + 1} using key {api_key[:10]}...")
-                
-                # استخدام الجلسة المحفوظة بدلاً من إنشاء جلسة جديدة
-                async with self.session.post(url, json=payload, headers=headers) as response:
-                    response_time = time.time() - request_start
-                    
-                    if response.status == 200:
-                        result = await response.json()
-                        
-                        if ('candidates' in result and len(result['candidates']) > 0 
-                            and 'content' in result['candidates'][0]
-                            and 'parts' in result['candidates'][0]['content']
-                            and len(result['candidates'][0]['content']['parts']) > 0):
-                            
-                            content = result['candidates'][0]['content']['parts'][0]['text']
-                            
-                            # تسجيل النجاح
-                            self.key_stats[api_key].record_success(response_time)
-                            logger.info(f"Request {request_type} succeeded with key {api_key[:10]}...")
-                            
-                            return content.strip(), response_time, api_key
+
+            # --- تغليف طلب HTTP بـ Circuit Breaker ---
+            cb = self.circuit_breakers[api_key]
+            result_holder: Dict[str, Any] = {}
+
+            async def _api_call():
+                """
+                دالة داخلية يُغلّفها Circuit Breaker.
+                ترفع _CircuitBreakerKeyError عند أي فشل حقيقي (server/network/invalid key)
+                حتى يحسبه pybreaker ضمن عداد الفشل.
+                لا ترفع استثناءً للـ 429 (rate limit) — يُعالج بشكل منفصل.
+                """
+                try:
+                    async with self.session.post(url, json=payload, headers=headers) as response:
+                        result_holder["status"] = response.status
+                        if response.status == 200:
+                            result_holder["json"] = await response.json()
+                        elif response.status == 429:
+                            # Rate limit ليس فشلاً حقيقياً للمفتاح — لا يفتح الدائرة
+                            result_holder["rate_limited"] = True
+                        elif response.status in [401, 403]:
+                            text = await response.text()
+                            raise _CircuitBreakerKeyError(response.status, text, "invalid_key")
+                        elif response.status >= 500:
+                            raise _CircuitBreakerKeyError(
+                                response.status, f"Server error {response.status}", "server_error"
+                            )
                         else:
-                            logger.warning(f"Unexpected response from Gemini: {result}")
-                            should_alert = self.key_stats[api_key].record_failure("invalid_response")
-                            if should_alert:
-                                logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times", key_status="consecutive_failures")
-                                console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times but remains in use.[/bold yellow]")
-                            
-                    elif response.status == 429:
-                        logger.warning(f"Rate limit exceeded for key {api_key[:10]}... waiting")
-                        should_alert = self.key_stats[api_key].record_failure("rate_limit")
-                        if should_alert:
-                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Rate Limit)", key_status="consecutive_failures")
-                            console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times due to rate limits.[/bold yellow]")
-                        
-                        # إبلاغ النظام التكيّفي بخطأ 429 الفعلي لتعديل RPM تلقائياً
-                        self.rate_limiters[api_key].record_429_error()
-                        
-                        # حظر المفتاح مؤقتاً
-                        block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
-                        self.blocked_keys[api_key] = time.time() + block_duration
-                        
-                        await asyncio.sleep(block_duration)
-                        
-                    elif response.status >= 500:
-                        logger.error(f"Gemini server error: {response.status}")
-                        should_alert = self.key_stats[api_key].record_failure("server_error")
-                        if should_alert:
-                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Server Error)", key_status="consecutive_failures")
-                            console.print(f"[bold red]⚠️ Alert: Key {api_key[:10]} is facing consecutive server errors![/bold red]")
-                        await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
-                        
+                            text = await response.text()
+                            raise _CircuitBreakerKeyError(response.status, text, "api_error")
+                except asyncio.TimeoutError:
+                    raise _CircuitBreakerKeyError(0, "Request timed out", "timeout")
+                except _CircuitBreakerKeyError:
+                    raise
+                except Exception as e:
+                    raise _CircuitBreakerKeyError(0, str(e), "exception")
+
+            try:
+                logger.info(
+                    f"Sending {request_type} request (attempt {attempt+1}) "
+                    f"key={api_key[:10]}... "
+                    f"maxTokens={dynamic_max_tokens} topK={profile['topK']} topP={profile['topP']}"
+                )
+                await cb(_api_call)()
+
+                response_time = time.time() - request_start
+
+                # --- معالجة النتيجة ---
+                if result_holder.get("json"):
+                    result = result_holder["json"]
+                    if (
+                        "candidates" in result
+                        and len(result["candidates"]) > 0
+                        and "content" in result["candidates"][0]
+                        and "parts" in result["candidates"][0]["content"]
+                        and len(result["candidates"][0]["content"]["parts"]) > 0
+                    ):
+                        content = result["candidates"][0]["content"]["parts"][0]["text"]
+                        self.key_stats[api_key].record_success(response_time)
+                        logger.info(f"Request {request_type} succeeded | key={api_key[:10]}... | time={response_time:.2f}s")
+                        return content.strip(), response_time, api_key
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Unexpected API error: {response.status} - {error_text}")
-                        should_alert = self.key_stats[api_key].record_failure("api_error")
+                        logger.warning(f"Unexpected response from Gemini: {result}")
+                        should_alert = self.key_stats[api_key].record_failure("invalid_response")
                         if should_alert:
-                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (API Error)", key_status="consecutive_failures")
-                            console.print(f"[bold red]⚠️ Alert: Key {api_key[:10]} is facing consecutive unexpected errors![/bold red]")
-                        
-                        # حظر المفتاح إذا كان الخطأ متعلق بالمفتاح نفسه
-                        if response.status in [401, 403]:
-                            self.blocked_keys[api_key] = time.time() + 3600  # حظر لمدة ساعة
-                            
-            except asyncio.TimeoutError:
-                logger.warning(f"Request {request_type} timed out (attempt {attempt + 1})")
-                should_alert = self.key_stats[api_key].record_failure("timeout")
+                            logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times", key_status="consecutive_failures")
+                            console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times but remains in use.[/bold yellow]")
+
+                elif result_holder.get("rate_limited"):
+                    logger.warning(f"Rate limit exceeded for key {api_key[:10]}... waiting")
+                    should_alert = self.key_stats[api_key].record_failure("rate_limit")
+                    if should_alert:
+                        logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Rate Limit)", key_status="consecutive_failures")
+                        console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times due to rate limits.[/bold yellow]")
+                    # إبلاغ النظام التكيّفي
+                    self.rate_limiters[api_key].record_429_error()
+                    block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
+                    self.blocked_keys[api_key] = time.time() + block_duration
+                    await asyncio.sleep(block_duration)
+
+            except pybreaker.CircuitBreakerError:
+                # الدائرة مفتوحة — المفتاح موقوف، ننتقل للمحاولة التالية
+                elapsed = time.time() - request_start
+                logger.warning(
+                    f"[CircuitBreaker] Circuit OPEN for key {api_key[:10]} "
+                    f"(fail_max=5 reached). Skipping to next key. elapsed={elapsed:.2f}s"
+                )
+                console.print(
+                    f"[bold red]⚡ Circuit Breaker OPEN: key {api_key[:10]} "
+                    f"suspended for {cb.reset_timeout}s[/bold red]"
+                )
+                continue  # جرّب مفتاحاً آخر
+
+            except _CircuitBreakerKeyError as e:
+                # فشل حقيقي — سجّل وعالج حسب نوع الخطأ
+                response_time = time.time() - request_start
+                error_type = e.error_type
+
+                should_alert = self.key_stats[api_key].record_failure(error_type)
                 if should_alert:
-                    logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Timeout)", key_status="consecutive_failures")
-                    console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} is consistently timing out.[/bold yellow]")
-                await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
-                
+                    logger.warning(
+                        f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times ({error_type})",
+                        key_status="consecutive_failures"
+                    )
+                    console.print(
+                        f"[bold red]⚠️ Alert: Key {api_key[:10]} is facing consecutive {error_type} errors![/bold red]"
+                    )
+
+                if error_type == "timeout":
+                    logger.warning(f"Request {request_type} timed out (attempt {attempt+1})")
+                    await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
+
+                elif error_type == "invalid_key":
+                    logger.error(f"Gemini API error {e.status} for key {api_key[:10]}: {e.message}")
+                    self.blocked_keys[api_key] = time.time() + 3600  # حظر لمدة ساعة
+                    # لا داعي للانتظار — انتقل لمفتاح آخر
+                    continue
+
+                elif error_type == "server_error":
+                    logger.error(f"Gemini server error {e.status}")
+                    await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
+
+                else:
+                    logger.error(f"Unexpected API error [{e.status}]: {e.message}")
+                    await asyncio.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
+
             except Exception as e:
-                logger.error(f"Error in {request_type} request (attempt {attempt + 1}): {str(e)}")
+                logger.error(f"Error in {request_type} request (attempt {attempt+1}): {str(e)}")
                 should_alert = self.key_stats[api_key].record_failure("exception")
                 if should_alert:
                     logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Exception)", key_status="consecutive_failures")
