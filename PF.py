@@ -432,75 +432,385 @@ class TokenRateLimiter:
 
 # ============= تحسين 3: إحصائيات محسنة للمفاتيح ونظام التنبيه الذكي =============
 class KeyStatistics:
-    """إحصائيات متقدمة لكل مفتاح API"""
-    
-    def __init__(self):
-        self.total_requests = 0
-        self.successful_requests = 0
-        self.failed_requests = 0
-        self.rate_limit_hits = 0
-        self.server_errors = 0
-        self.consecutive_failures = 0  # تتبع الأخطاء المتتالية للتنبيه
-        self.last_error_time = None
-        self.last_success_time = None
-        self.average_response_time = 0
-        self.response_times = deque(maxlen=100)  # آخر 100 وقت استجابة
-        
+    """
+    إحصائيات متقدمة وذكية لكل مفتاح API مع:
+      ✅ تخزين دائم في SQLite بين الجلسات (لا يصفّر التاريخ عند إغلاق البرنامج)
+      ✅ تصنيف دقيق لأنواع الفشل: network_error / rate_limit / invalid_key /
+         content_blocked / server_error — كل نوع يحمل وزناً مختلفاً
+      ✅ نقاط صحة مبنية على بيانات حقيقية لا عقوبات تقديرية ثابتة
+      ✅ نموذج تنبؤ ساعي بسيط يتعلم متى يكون المفتاح في أفضل حالاته
+    """
+
+    _DB_PATH: Path = Path("key_statistics.db")
+    _db_initialized: bool = False  # يُهيَّأ مرة واحدة على مستوى الكلاس
+
+    # ---- الأنواع القياسية للفشل ----
+    FAILURE_TYPES = frozenset([
+        'network_error',    # timeout / اتصال مقطوع / استثناء شبكي
+        'rate_limit',       # 429 - تجاوز حد الطلبات
+        'invalid_key',      # 401/403 - مفتاح منتهٍ أو محظور
+        'content_blocked',  # رد غير متوقع أو محجوب من Gemini Safety
+        'server_error',     # 5xx - خطأ في سيرفر Gemini
+        'general',          # أخطاء لا تندرج تحت فئة محددة
+    ])
+
+    # خريطة التوحيد: raw error_type الموجود في الكود → canonical type
+    _ERROR_CODE_MAP: Dict[str, str] = {
+        'timeout':          'network_error',
+        'exception':        'network_error',
+        'network_error':    'network_error',
+        'rate_limit':       'rate_limit',
+        'invalid_key':      'invalid_key',
+        'api_error':        'invalid_key',       # 401/403 في make_precision_request
+        'content_blocked':  'content_blocked',
+        'invalid_response': 'content_blocked',   # رد Gemini غير متوقع
+        'server_error':     'server_error',
+        'general':          'general',
+    }
+
+    # أوزان تأثير كل نوع فشل على نقطة الصحة
+    # (مشتقة من طبيعة كل خطأ، ليست تقديرية عشوائية)
+    FAILURE_WEIGHTS: Dict[str, float] = {
+        'invalid_key':      3.0,   # الأشد خطورة — يعني المفتاح معطَّل نهائياً
+        'server_error':     1.5,   # خطير لكن مؤقت
+        'network_error':    0.8,   # مؤقت، ناجم عن ظروف الشبكة
+        'rate_limit':       0.4,   # متوقع في الاستخدام المكثف
+        'content_blocked':  0.2,   # لا علاقة له بصحة المفتاح نفسه
+        'general':          1.0,
+    }
+
+    def __init__(self, key_id: str = ""):
+        self.key_id   = key_id
+        # تجزئة للهوية في DB (لا نخزّن المفتاح الحقيقي)
+        self.key_hash = hashlib.md5(key_id.encode()).hexdigest()[:16] if key_id else "unknown"
+
+        # ---- عدادات في الذاكرة ----
+        self.total_requests:        int   = 0
+        self.successful_requests:   int   = 0
+        self.failed_requests:       int   = 0
+        self.consecutive_failures:  int   = 0
+        self.last_error_time:   Optional[datetime] = None
+        self.last_success_time: Optional[datetime] = None
+        self.average_response_time: float = 0.0
+        self.response_times: deque = deque(maxlen=100)
+
+        # ---- عدادات مصنَّفة لأنواع الفشل ----
+        self.failure_counts: Dict[str, int] = {ft: 0 for ft in self.FAILURE_TYPES}
+
+        # ---- بيانات ساعية للتنبؤ: {0..23: {'success': N, 'total': N}} ----
+        self.hourly_data: Dict[int, Dict[str, int]] = {
+            h: {'success': 0, 'total': 0} for h in range(24)
+        }
+
+        # ---- تحكم في كثافة الكتابة إلى DB ----
+        self._save_counter: int = 0
+        self._SAVE_EVERY:   int = 5   # حفظ كل 5 طلبات لتجنب I/O زائد
+
+        # تهيئة DB وتحميل البيانات المحفوظة إن وُجدت
+        if key_id:
+            self._ensure_db()
+            self._load_from_db()
+
+    # ------------------------------------------------------------------ #
+    #  إدارة قاعدة البيانات                                               #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _ensure_db(cls):
+        """إنشاء جدول SQLite إن لم يكن موجوداً (يُنفَّذ مرة واحدة على مستوى الكلاس)."""
+        if cls._db_initialized:
+            return
+        try:
+            with sqlite3.connect(cls._DB_PATH) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS key_statistics (
+                        key_hash            TEXT PRIMARY KEY,
+                        total_requests      INTEGER NOT NULL DEFAULT 0,
+                        successful_requests INTEGER NOT NULL DEFAULT 0,
+                        failed_requests     INTEGER NOT NULL DEFAULT 0,
+                        failure_counts      TEXT    NOT NULL DEFAULT '{}',
+                        hourly_data         TEXT    NOT NULL DEFAULT '{}',
+                        avg_response_time   REAL    NOT NULL DEFAULT 0.0,
+                        response_times      TEXT    NOT NULL DEFAULT '[]',
+                        last_error_time     TEXT,
+                        last_success_time   TEXT,
+                        updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+                    )
+                """)
+                conn.commit()
+            cls._db_initialized = True
+            logger.info("[KeyStatistics] SQLite DB initialized successfully")
+        except Exception as e:
+            logger.warning(f"[KeyStatistics] DB init failed: {e}")
+
+    def _load_from_db(self):
+        """تحميل الإحصائيات المحفوظة من SQLite إلى الذاكرة عند بدء الجلسة."""
+        try:
+            with sqlite3.connect(self._DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM key_statistics WHERE key_hash = ?",
+                    (self.key_hash,)
+                ).fetchone()
+
+            if not row:
+                return  # مفتاح جديد — لا توجد بيانات سابقة
+
+            self.total_requests        = row['total_requests']
+            self.successful_requests   = row['successful_requests']
+            self.failed_requests       = row['failed_requests']
+            self.average_response_time = row['avg_response_time']
+
+            # تحميل عدادات الفشل المصنَّفة
+            stored_fc = json.loads(row['failure_counts'] or '{}')
+            for ft in self.FAILURE_TYPES:
+                self.failure_counts[ft] = stored_fc.get(ft, 0)
+
+            # تحميل البيانات الساعية
+            stored_hd = json.loads(row['hourly_data'] or '{}')
+            for h in range(24):
+                entry = stored_hd.get(str(h), {})
+                self.hourly_data[h]['success'] = entry.get('success', 0)
+                self.hourly_data[h]['total']   = entry.get('total',   0)
+
+            # تحميل آخر أوقات الاستجابة
+            stored_rt = json.loads(row['response_times'] or '[]')
+            self.response_times = deque(stored_rt, maxlen=100)
+            self._update_average_response_time()
+
+            # تحميل أوقات آخر خطأ/نجاح
+            if row['last_error_time']:
+                try:
+                    self.last_error_time = datetime.fromisoformat(row['last_error_time'])
+                except Exception:
+                    pass
+            if row['last_success_time']:
+                try:
+                    self.last_success_time = datetime.fromisoformat(row['last_success_time'])
+                except Exception:
+                    pass
+
+            logger.info(
+                f"[KeyStatistics] Loaded history for {self.key_hash}: "
+                f"{self.total_requests} requests, "
+                f"success_rate={self.get_success_rate():.1f}%"
+            )
+        except Exception as e:
+            logger.warning(f"[KeyStatistics] Load from DB failed ({self.key_hash}): {e}")
+
+    def _save_to_db(self, force: bool = False):
+        """
+        حفظ الإحصائيات في SQLite.
+        يُكتب فعلياً كل _SAVE_EVERY طلبات (أو فوراً إذا force=True)
+        لتجنب I/O زائد على كل طلب.
+        """
+        self._save_counter += 1
+        if not force and (self._save_counter % self._SAVE_EVERY != 0):
+            return
+        try:
+            with sqlite3.connect(self._DB_PATH) as conn:
+                conn.execute("""
+                    INSERT INTO key_statistics
+                        (key_hash, total_requests, successful_requests, failed_requests,
+                         failure_counts, hourly_data, avg_response_time, response_times,
+                         last_error_time, last_success_time, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                    ON CONFLICT(key_hash) DO UPDATE SET
+                        total_requests      = excluded.total_requests,
+                        successful_requests = excluded.successful_requests,
+                        failed_requests     = excluded.failed_requests,
+                        failure_counts      = excluded.failure_counts,
+                        hourly_data         = excluded.hourly_data,
+                        avg_response_time   = excluded.avg_response_time,
+                        response_times      = excluded.response_times,
+                        last_error_time     = excluded.last_error_time,
+                        last_success_time   = excluded.last_success_time,
+                        updated_at          = excluded.updated_at
+                """, (
+                    self.key_hash,
+                    self.total_requests,
+                    self.successful_requests,
+                    self.failed_requests,
+                    json.dumps(self.failure_counts, ensure_ascii=False),
+                    json.dumps(self.hourly_data,    ensure_ascii=False),
+                    self.average_response_time,
+                    json.dumps(list(self.response_times)),
+                    self.last_error_time.isoformat()   if self.last_error_time   else None,
+                    self.last_success_time.isoformat() if self.last_success_time else None,
+                ))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[KeyStatistics] Save to DB failed ({self.key_hash}): {e}")
+
+    # ------------------------------------------------------------------ #
+    #  تسجيل الأحداث                                                      #
+    # ------------------------------------------------------------------ #
+
     def record_success(self, response_time: float):
-        """تسجيل طلب ناجح وإعادة تعيين عداد الإخفاقات المتتالية"""
+        """تسجيل طلب ناجح، تحديث البيانات الساعية، وإعادة تعيين عداد الإخفاقات."""
         self.successful_requests += 1
-        self.total_requests += 1
+        self.total_requests      += 1
         self.consecutive_failures = 0
-        self.last_success_time = datetime.now()
+        self.last_success_time    = datetime.now()
         self.response_times.append(response_time)
         self._update_average_response_time()
-    
-    def record_failure(self, error_type: str = "general") -> bool:
-        """تسجيل طلب فاشل. يرجع True إذا وصل عدد الإخفاقات المتتالية إلى 3 للتنبيه."""
-        self.failed_requests += 1
-        self.total_requests += 1
-        self.consecutive_failures += 1
-        self.last_error_time = datetime.now()
-        
-        if error_type == "rate_limit":
-            self.rate_limit_hits += 1
-        elif error_type == "server_error":
-            self.server_errors += 1
 
+        # تحديث البيانات الساعية (أساس نموذج التنبؤ)
+        hour = self.last_success_time.hour
+        self.hourly_data[hour]['success'] += 1
+        self.hourly_data[hour]['total']   += 1
+
+        self._save_to_db()
+
+    def record_failure(self, error_type: str = "general") -> bool:
+        """
+        تسجيل طلب فاشل مع تصنيف دقيق لنوع الفشل.
+        يُوحَّد error_type إلى النوع القياسي المناسب تلقائياً.
+        يرجع True إذا وصل عدد الإخفاقات المتتالية إلى 3 (للتنبيه في المستدعي).
+        """
+        # توحيد النوع الخام إلى النوع القياسي
+        canonical = self._ERROR_CODE_MAP.get(error_type, 'general')
+
+        self.failed_requests      += 1
+        self.total_requests       += 1
+        self.last_error_time       = datetime.now()
+        self.failure_counts[canonical] = self.failure_counts.get(canonical, 0) + 1
+
+        # content_blocked و rate_limit لا يعكسان خللاً في المفتاح نفسه
+        # → لا تزيد عداد الإخفاقات المتتالية (لتجنب التأثير الخاطئ على get_health_score)
+        if canonical not in ('content_blocked', 'rate_limit'):
+            self.consecutive_failures += 1
+
+        # تحديث البيانات الساعية (فشل → total فقط، بدون success)
+        hour = self.last_error_time.hour
+        self.hourly_data[hour]['total'] += 1
+
+        self._save_to_db(force=(self.consecutive_failures >= 3))
         return self.consecutive_failures >= 3
-    
+
+    # ------------------------------------------------------------------ #
+    #  خصائص التوافق مع الكود القديم (للحفاظ على الهيكلة)               #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def rate_limit_hits(self) -> int:
+        """توافق مع الكود القديم — يقرأ من failure_counts المصنَّفة."""
+        return self.failure_counts.get('rate_limit', 0)
+
+    @property
+    def server_errors(self) -> int:
+        """توافق مع الكود القديم — يقرأ من failure_counts المصنَّفة."""
+        return self.failure_counts.get('server_error', 0)
+
+    # ------------------------------------------------------------------ #
+    #  الحسابات والتحليل                                                  #
+    # ------------------------------------------------------------------ #
+
     def _update_average_response_time(self):
-        """تحديث متوسط وقت الاستجابة"""
+        """تحديث متوسط وقت الاستجابة من نافذة آخر 100 طلب."""
         if self.response_times:
             self.average_response_time = sum(self.response_times) / len(self.response_times)
-    
+
     def get_success_rate(self) -> float:
-        """حساب معدل النجاح"""
+        """حساب معدل النجاح الإجمالي (0-100)."""
         if self.total_requests == 0:
-            return 0
+            return 0.0
         return (self.successful_requests / self.total_requests) * 100
-    
+
     def get_health_score(self) -> float:
-        """حساب نقاط الصحة للمفتاح (0-100)"""
+        """
+        نقاط الصحة (0-100) مبنية على بيانات حقيقية لا عقوبات تقديرية ثابتة.
+
+        المكوّنات:
+          base_score     = معدل النجاح الإجمالي
+          failure_penalty = مجموع(عدد_فشل_نوع × وزن_النوع) / إجمالي_الطلبات × 20
+                           (حد أقصى 40 نقطة — مشتق من نسبة الفشل الحقيقية)
+          consec_penalty  = 5 × consecutive_failures (حد أقصى 25)
+          recency_bonus   = +5 إذا كان آخر طلب ناجح منذ أقل من 30 دقيقة
+
+        حالات خاصة:
+          • مفتاح جديد (0 طلبات)  → 100 (فرصة كاملة)
+          • 3+ أخطاء invalid_key   → 0  (المفتاح معطَّل، يُزال من الدوران)
+        """
         if self.total_requests == 0:
-            return 100  # مفتاح جديد
-        
-        success_rate = self.get_success_rate()
-        
-        # عقوبة للأخطاء الحديثة
-        recent_error_penalty = 0
-        if self.last_error_time:
-            hours_since_error = (datetime.now() - self.last_error_time).total_seconds() / 3600
-            if hours_since_error < 1:
-                recent_error_penalty = 20
-            elif hours_since_error < 6:
-                recent_error_penalty = 10
-        
-        # عقوبة لكثرة rate limit
-        rate_limit_penalty = min(self.rate_limit_hits * 5, 30)
-        
-        health_score = success_rate - recent_error_penalty - rate_limit_penalty
-        return max(0, min(100, health_score))
+            return 100.0
+
+        # مفتاح معطَّل نهائياً
+        if self.failure_counts.get('invalid_key', 0) >= 3:
+            return 0.0
+
+        # 1. النقطة الأساسية
+        base_score = self.get_success_rate()
+
+        # 2. عقوبة الفشل المرجَّحة (مبنية على البيانات الحقيقية)
+        weighted_failures = sum(
+            self.failure_counts.get(ft, 0) * self.FAILURE_WEIGHTS.get(ft, 1.0)
+            for ft in self.FAILURE_TYPES
+        )
+        failure_penalty = min(
+            (weighted_failures / max(self.total_requests, 1)) * 20.0,
+            40.0  # سقف الخصم
+        )
+
+        # 3. عقوبة الإخفاقات المتتالية الحالية (مؤشر آني)
+        consec_penalty = min(self.consecutive_failures * 5.0, 25.0)
+
+        # 4. مكافأة النشاط الأخير السليم
+        recency_bonus = 0.0
+        if (self.last_success_time and
+                (self.last_error_time is None or self.last_success_time > self.last_error_time)):
+            mins_since_success = (datetime.now() - self.last_success_time).total_seconds() / 60
+            if mins_since_success < 30:
+                recency_bonus = 5.0
+
+        health = base_score - failure_penalty - consec_penalty + recency_bonus
+        return max(0.0, min(100.0, health))
+
+    # ------------------------------------------------------------------ #
+    #  نموذج التنبؤ الساعي                                                #
+    # ------------------------------------------------------------------ #
+
+    def get_predicted_performance(self) -> float:
+        """
+        تنبؤ بالأداء المتوقع للمفتاح في الساعة الحالية بناءً على البيانات التاريخية.
+
+        الخوارزمية:
+          • إذا توفرت ≥5 طلبات تاريخية لهذه الساعة بالذات:
+              predicted = 70% × معدل_النجاح_الساعي + 30% × معدل_النجاح_الإجمالي
+            (الوزن الأكبر للساعي لأنه الأدق لهذه اللحظة من اليوم)
+          • وإلا (بيانات غير كافية):
+              predicted = get_health_score()  (fallback آمن)
+
+        يُستدعى من get_optimal_api_key لاختيار المفتاح الأنسب لكل لحظة.
+        """
+        current_hour = datetime.now().hour
+        hourly   = self.hourly_data.get(current_hour, {'success': 0, 'total': 0})
+        global_rate = self.get_success_rate()
+
+        if hourly['total'] >= 5:
+            hourly_rate = (hourly['success'] / hourly['total']) * 100
+            predicted   = 0.7 * hourly_rate + 0.3 * global_rate
+        else:
+            # بيانات ساعية غير كافية → نقطة الصحة الحالية كـ fallback
+            predicted = self.get_health_score()
+
+        return max(0.0, min(100.0, predicted))
+
+    def get_failure_breakdown(self) -> Dict[str, Any]:
+        """
+        تفصيل مصنَّف لجميع أنواع الفشل (مفيد للتشخيص والسجلات).
+        يُعرض في get_statistics_summary.
+        """
+        return {
+            canonical: {
+                'count':      self.failure_counts.get(canonical, 0),
+                'percentage': round(
+                    self.failure_counts.get(canonical, 0) / max(self.total_requests, 1) * 100, 1
+                ),
+                'weight':     self.FAILURE_WEIGHTS.get(canonical, 1.0),
+            }
+            for canonical in self.FAILURE_TYPES
+        }
 
 # ============= الفئة المحسنة الرئيسية (مع المفاتيح كما هي) =============
 class EnhancedGeminiAPI:
@@ -532,8 +842,8 @@ class EnhancedGeminiAPI:
             for key in self.api_keys
         }
         
-        # إحصائيات متقدمة لكل مفتاح
-        self.key_stats = {key: KeyStatistics() for key in self.api_keys}
+        # إحصائيات متقدمة لكل مفتاح (مع تمرير key_id لتفعيل SQLite والتنبؤ)
+        self.key_stats = {key: KeyStatistics(key_id=key) for key in self.api_keys}
         
         # مفاتيح محظورة مؤقتاً
         self.blocked_keys = {}  # {key: unblock_time}
@@ -608,9 +918,10 @@ class EnhancedGeminiAPI:
                 if not self.rate_limiters[key].can_make_request(estimated_tokens):
                     continue
 
-                # التحقق من صحة المفتاح
-                health_score = self.key_stats[key].get_health_score()
-                if health_score < 10:
+                # التحقق من صحة المفتاح باستخدام التنبؤ الذكي
+                # (يدمج معدل النجاح الساعي التاريخي + الصحة الكلية)
+                predicted_perf = self.key_stats[key].get_predicted_performance()
+                if predicted_perf < 10:
                     continue
 
                 return key
@@ -812,17 +1123,21 @@ class EnhancedGeminiAPI:
             key_info = {
                 'key_preview': f"{key[:10]}...",
                 'health_score': stats.get_health_score(),
+                'predicted_performance': round(stats.get_predicted_performance(), 1),
                 'success_rate': stats.get_success_rate(),
                 'total_requests': stats.total_requests,
                 'successful_requests': stats.successful_requests,
                 'failed_requests': stats.failed_requests,
                 'avg_response_time': round(stats.average_response_time, 2),
-                'is_blocked': key in self.blocked_keys
+                'is_blocked': key in self.blocked_keys,
+                'failure_breakdown': stats.get_failure_breakdown(),
             }
             summary['keys_performance'].append(key_info)
         
-        # ترتيب حسب الصحة
-        summary['keys_performance'].sort(key=lambda x: x['health_score'], reverse=True)
+        # ترتيب حسب الأداء المتنبأ به (يدمج الصحة والتاريخ الساعي)
+        summary['keys_performance'].sort(
+            key=lambda x: x['predicted_performance'], reverse=True
+        )
         
         return summary
     
