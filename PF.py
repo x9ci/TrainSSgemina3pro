@@ -142,74 +142,293 @@ def setup_comprehensive_logging():
 logger, quality_logger = setup_comprehensive_logging()
 
 # ============= تحسين 2: نظام Rate Limiting محسن (Tokens & Requests) =============
+
+# --- تقدير التوكنز الذكي المدرك للغة ---
+def _estimate_tokens_smart(text: str) -> int:
+    """
+    تقدير دقيق للتوكنز مع دعم نصوص مختلطة العربية/الإنجليزية.
+    يستخدم tiktoken إذا كان متاحاً (دقة عالية)، وإلا يستخدم
+    إحصاءات لغوية محسّنة تُراعي أن النصوص العربية تحتاج 20-40% توكنز أكثر.
+    """
+    if not text:
+        return 0
+
+    # المحاولة الأولى: tiktoken (دقة عالية، يعمل محلياً)
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        return max(1, len(enc.encode(text)))
+    except (ImportError, Exception):
+        pass
+
+    # تحليل لغوي للنص
+    total_chars = len(text)
+    if total_chars == 0:
+        return 0
+
+    # حساب نسبة الأحرف العربية (U+0600–U+06FF)
+    arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+    arabic_ratio = arabic_chars / total_chars
+
+    # معادلة التقدير المحسّنة:
+    # • نص عربي بحت  → ~2.3 حرف/توكن
+    # • نص مختلط     → ~3.0 حرف/توكن
+    # • نص إنجليزي   → ~4.0 حرف/توكن
+    if arabic_ratio >= 0.50:
+        chars_per_token = 2.3
+    elif arabic_ratio >= 0.20:
+        chars_per_token = 3.0
+    else:
+        chars_per_token = 4.0
+
+    return max(1, int(total_chars / chars_per_token))
+
+
+# --- ملف إعدادات Rate Limiter الخارجي ---
+_RATE_LIMITER_CONFIG_PATH = Path("rate_limiter_config.json")
+
+_RATE_LIMITER_DEFAULT_CONFIG = {
+    "default": {
+        "max_rpm": 2,
+        "max_tpm": 32000,
+        "max_rpd": 50
+    },
+    "adaptive": {
+        "enabled": True,
+        "min_rpm_floor": 1,
+        "error_threshold_per_hour": 3,
+        "reduction_factor": 0.5,
+        "recovery_factor": 0.1
+    },
+    "keys": {}
+}
+
+
+def _load_rate_limiter_config() -> dict:
+    """
+    تحميل إعدادات Rate Limiter من ملف JSON خارجي.
+    إذا لم يوجد الملف، يتم إنشاؤه بالإعدادات الافتراضية تلقائياً.
+    البنية:
+      {
+        "default": { "max_rpm": 2, "max_tpm": 32000, "max_rpd": 50 },
+        "adaptive": { "enabled": true, ... },
+        "keys": {
+          "AIzaSy...": { "max_rpm": 5, "max_tpm": 60000, "max_rpd": 100 }
+        }
+      }
+    """
+    if _RATE_LIMITER_CONFIG_PATH.exists():
+        try:
+            with open(_RATE_LIMITER_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            # دمج مع الإعدادات الافتراضية (لدعم الإضافات المستقبلية)
+            merged = _RATE_LIMITER_DEFAULT_CONFIG.copy()
+            merged["default"].update(loaded.get("default", {}))
+            merged["adaptive"].update(loaded.get("adaptive", {}))
+            merged["keys"].update(loaded.get("keys", {}))
+            return merged
+        except Exception:
+            pass  # fallback to defaults
+
+    # إنشاء الملف الافتراضي للمرة الأولى
+    try:
+        with open(_RATE_LIMITER_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(_RATE_LIMITER_DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    return _RATE_LIMITER_DEFAULT_CONFIG.copy()
+
+
 class TokenRateLimiter:
-    """نظام rate limiting متقدم يتعقب الطلبات والتوكنز والحد اليومي"""
-    def __init__(self, max_rpm: int = 2, max_tpm: int = 32000, max_rpd: int = 50):
-        self.max_rpm = max_rpm
-        self.max_tpm = max_tpm
-        self.max_rpd = max_rpd
+    """
+    نظام Rate Limiting ذكي ومتكيّف لكل مفتاح API.
+    
+    المميزات:
+      ✅ إعدادات قابلة للتهيئة من ملف خارجي (rate_limiter_config.json)
+      ✅ دعم إعدادات مختلفة لكل مفتاح API على حدة (خطط مختلفة)
+      ✅ تقدير دقيق للتوكنز يراعي النصوص العربية (دعم tiktoken)
+      ✅ نظام تكيّفي: يتعلم من أخطاء 429 ويخفّض RPM تلقائياً
+        في الساعات ذات الضغط العالي ثم يعود تدريجياً للحد الطبيعي
+    """
 
-        self.requests = deque() # tuples of (time, tokens)
-        self.daily_requests = deque() # times of requests within the last 24h
+    def __init__(self, max_rpm: int = 2, max_tpm: int = 32000, max_rpd: int = 50,
+                 key_id: Optional[str] = None):
+        """
+        Args:
+            max_rpm: الحد الأقصى للطلبات في الدقيقة (قابل للتجاوز من الملف الخارجي).
+            max_tpm: الحد الأقصى للتوكنز في الدقيقة.
+            max_rpd: الحد الأقصى للطلبات في اليوم.
+            key_id: مفتاح API للبحث عن إعداداته المخصصة في ملف الإعداد.
+        """
+        # --- تحميل الإعدادات من الملف الخارجي ---
+        config = _load_rate_limiter_config()
+        default_cfg = config.get("default", {})
+        adaptive_cfg = config.get("adaptive", {})
+        key_cfg = config.get("keys", {}).get(key_id, {}) if key_id else {}
 
-    def can_make_request(self, estimated_tokens: int = 0) -> bool:
-        now = time.time()
-        # إزالة الطلبات القديمة خارج الدقيقة
+        # الأولوية: إعدادات المفتاح المخصصة ← ملف الإعداد ← المعاملات الممررة
+        self._base_max_rpm = key_cfg.get("max_rpm", default_cfg.get("max_rpm", max_rpm))
+        self._base_max_tpm = key_cfg.get("max_tpm", default_cfg.get("max_tpm", max_tpm))
+        self._base_max_rpd = key_cfg.get("max_rpd", default_cfg.get("max_rpd", max_rpd))
+
+        # الحدود الفعّالة الحالية (قد تُقلَّص مؤقتاً من النظام التكيّفي)
+        self.max_rpm = self._base_max_rpm
+        self.max_tpm = self._base_max_tpm
+        self.max_rpd = self._base_max_rpd
+
+        # --- طوابير الطلبات ---
+        self.requests: deque = deque()        # (timestamp, tokens)
+        self.daily_requests: deque = deque()  # timestamps خلال 24 ساعة
+
+        # --- النظام التكيّفي ---
+        self._adaptive_enabled: bool = adaptive_cfg.get("enabled", True)
+        self._min_rpm_floor: int = max(1, adaptive_cfg.get("min_rpm_floor", 1))
+        self._error_threshold: int = adaptive_cfg.get("error_threshold_per_hour", 3)
+        self._reduction_factor: float = adaptive_cfg.get("reduction_factor", 0.5)
+        self._recovery_factor: float = adaptive_cfg.get("recovery_factor", 0.1)
+
+        # عداد أخطاء 429 مُجمَّعة بالساعة {hour_of_day: count}
+        self._errors_by_hour: Dict[int, int] = {}
+        # الساعة التي آخر مرة حدث فيها تعديل تكيّفي
+        self._last_adaptive_hour: Optional[int] = None
+
+    # ------------------------------------------------------------------ #
+    #  تقدير التوكنز                                                       #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """تقدير دقيق لعدد توكنز النص يعتمد على _estimate_tokens_smart."""
+        return _estimate_tokens_smart(text)
+
+    # ------------------------------------------------------------------ #
+    #  النظام التكيّفي                                                     #
+    # ------------------------------------------------------------------ #
+
+    def record_429_error(self):
+        """
+        تسجيل خطأ 429 (Rate Limit) من الـ API الفعلي.
+        بعد تجاوز _error_threshold في الساعة الحالية، يُخفَّض max_rpm
+        بمعامل _reduction_factor حتى لا يقل عن _min_rpm_floor.
+        """
+        if not self._adaptive_enabled:
+            return
+
+        current_hour = datetime.now().hour
+        self._errors_by_hour[current_hour] = self._errors_by_hour.get(current_hour, 0) + 1
+
+        if self._errors_by_hour[current_hour] >= self._error_threshold:
+            new_rpm = max(self._min_rpm_floor,
+                          int(self.max_rpm * (1.0 - self._reduction_factor)))
+            if new_rpm < self.max_rpm:
+                self.max_rpm = new_rpm
+                logger.warning(
+                    f"[AdaptiveRateLimiter] ارتفاع أخطاء 429 في الساعة {current_hour}:00 "
+                    f"→ تخفيض RPM إلى {self.max_rpm}/{self._base_max_rpm}"
+                )
+
+        self._last_adaptive_hour = current_hour
+
+    def _try_recover_rpm(self):
+        """
+        محاولة استعادة RPM تدريجياً بعد ساعة هادئة (بدون أخطاء 429 جديدة).
+        تُستدعى داخلياً عند كل طلب ناجح.
+        """
+        if not self._adaptive_enabled:
+            return
+        if self.max_rpm >= self._base_max_rpm:
+            return
+
+        current_hour = datetime.now().hour
+        hour_errors = self._errors_by_hour.get(current_hour, 0)
+
+        # إذا لم تحدث أخطاء في الساعة الحالية، استعد جزءاً من الحد الأصلي
+        if hour_errors == 0:
+            recovered = max(1, int(self._base_max_rpm * self._recovery_factor))
+            self.max_rpm = min(self._base_max_rpm, self.max_rpm + recovered)
+
+    # ------------------------------------------------------------------ #
+    #  الواجهة الرئيسية (تتوافق 100% مع الإصدار السابق)                   #
+    # ------------------------------------------------------------------ #
+
+    def _purge_old_entries(self, now: float):
+        """إزالة الإدخالات القديمة خارج نافذة الدقيقة والـ 24 ساعة."""
         while self.requests and self.requests[0][0] < now - 60:
             self.requests.popleft()
-
-        # إزالة الطلبات القديمة خارج اليوم
         while self.daily_requests and self.daily_requests[0] < now - 86400:
             self.daily_requests.popleft()
 
-        current_rpm = len(self.requests)
-        current_tpm = sum(tokens for _, tokens in self.requests)
-        current_rpd = len(self.daily_requests)
-        
-        if current_rpm >= self.max_rpm:
+    def can_make_request(self, estimated_tokens: int = 0) -> bool:
+        """هل يمكن إرسال طلب جديد الآن دون تجاوز أي حد؟"""
+        now = time.time()
+        self._purge_old_entries(now)
+
+        if len(self.requests) >= self.max_rpm:
             return False
-        if current_tpm + estimated_tokens > self.max_tpm:
+        if sum(t for _, t in self.requests) + estimated_tokens > self.max_tpm:
             return False
-        if current_rpd >= self.max_rpd:
+        if len(self.daily_requests) >= self.max_rpd:
             return False
 
         return True
 
     def add_request(self, estimated_tokens: int = 0):
+        """تسجيل طلب جديد وتحديث النظام التكيّفي للاسترداد."""
         now = time.time()
         self.requests.append((now, estimated_tokens))
         self.daily_requests.append(now)
+        # محاولة استعادة RPM تدريجياً عند كل طلب ناجح
+        self._try_recover_rpm()
 
     def time_until_next_request(self, estimated_tokens: int = 0) -> float:
+        """وقت الانتظار (بالثواني) حتى يمكن إرسال طلب جديد."""
         if self.can_make_request(estimated_tokens):
-            return 0
-        
-        now = time.time()
+            return 0.0
 
-        while self.requests and self.requests[0][0] < now - 60:
-            self.requests.popleft()
-        while self.daily_requests and self.daily_requests[0] < now - 86400:
-            self.daily_requests.popleft()
+        now = time.time()
+        self._purge_old_entries(now)
 
         wait_times = []
 
+        # انتظار بسبب الحد اليومي
         if len(self.daily_requests) >= self.max_rpd:
             wait_times.append((self.daily_requests[0] + 86400) - now)
 
+        # انتظار بسبب حد الطلبات في الدقيقة
         if len(self.requests) >= self.max_rpm:
             wait_times.append((self.requests[0][0] + 60) - now)
 
-        current_tpm = sum(tokens for _, tokens in self.requests)
+        # انتظار بسبب حد التوكنز في الدقيقة
+        current_tpm = sum(t for _, t in self.requests)
         if current_tpm + estimated_tokens > self.max_tpm:
-            tokens_to_drop = (current_tpm + estimated_tokens) - self.max_tpm
-            dropped = 0
+            tokens_to_free = (current_tpm + estimated_tokens) - self.max_tpm
+            freed = 0
             for req_time, tokens in self.requests:
-                dropped += tokens
-                if dropped >= tokens_to_drop:
+                freed += tokens
+                if freed >= tokens_to_free:
                     wait_times.append((req_time + 60) - now)
                     break
 
         return max(wait_times) if wait_times else 0.0
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        حالة Rate Limiter الحالية (مفيد للتشخيص والسجلات).
+        """
+        now = time.time()
+        self._purge_old_entries(now)
+        return {
+            "effective_rpm": self.max_rpm,
+            "base_rpm": self._base_max_rpm,
+            "max_tpm": self.max_tpm,
+            "max_rpd": self.max_rpd,
+            "current_rpm_usage": len(self.requests),
+            "current_tpm_usage": sum(t for _, t in self.requests),
+            "current_rpd_usage": len(self.daily_requests),
+            "adaptive_enabled": self._adaptive_enabled,
+            "errors_by_hour": dict(self._errors_by_hour),
+        }
 
 # ============= تحسين 3: إحصائيات محسنة للمفاتيح ونظام التنبيه الذكي =============
 class KeyStatistics:
@@ -307,8 +526,11 @@ class EnhancedGeminiAPI:
         if isinstance(api_keys, list):
             self.api_keys.extend([key for key in api_keys if key not in self.api_keys])
         
-        # Rate limiters لكل مفتاح - استخدام النظام المحسن مع حدود Gemini 2.5 Pro
-        self.rate_limiters = {key: TokenRateLimiter(max_rpm=2, max_tpm=32000, max_rpd=50) for key in self.api_keys}
+        # Rate limiters لكل مفتاح - إعدادات قابلة للتهيئة من ملف خارجي
+        self.rate_limiters = {
+            key: TokenRateLimiter(max_rpm=2, max_tpm=32000, max_rpd=50, key_id=key)
+            for key in self.api_keys
+        }
         
         # إحصائيات متقدمة لكل مفتاح
         self.key_stats = {key: KeyStatistics() for key in self.api_keys}
@@ -358,8 +580,8 @@ class EnhancedGeminiAPI:
             logger.info(f"Unblocked key: {key[:10]}...")
     
     def estimate_tokens(self, text: str) -> int:
-        """تقدير عدد التوكنز في النص (تقريباً 4 أحرف = 1 توكن)"""
-        return max(1, len(text) // 4)
+        """تقدير دقيق لعدد التوكنز: يدعم tiktoken للعربية والإنجليزية."""
+        return _estimate_tokens_smart(text)
 
     async def get_optimal_api_key(self, estimated_tokens: int = 0) -> Optional[str]:
         """الحصول على المفتاح التالي المتاح باستخدام Round-Robin مع انتظار ذكي"""
@@ -528,6 +750,9 @@ class EnhancedGeminiAPI:
                         if should_alert:
                             logger.warning(f"Intelligence Alert: Key {api_key[:10]}... failed 3 consecutive times (Rate Limit)", key_status="consecutive_failures")
                             console.print(f"[bold yellow]⚠️ Alert: Key {api_key[:10]} failed 3 consecutive times due to rate limits.[/bold yellow]")
+                        
+                        # إبلاغ النظام التكيّفي بخطأ 429 الفعلي لتعديل RPM تلقائياً
+                        self.rate_limiters[api_key].record_429_error()
                         
                         # حظر المفتاح مؤقتاً
                         block_duration = self.retry_delays[min(attempt, len(self.retry_delays)-1)]
