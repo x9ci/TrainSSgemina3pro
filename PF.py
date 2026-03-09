@@ -12,30 +12,22 @@ import time
 import logging
 import asyncio
 import aiohttp
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+import re
+import sqlite3
+import contextlib
+import hashlib
+import traceback
+import unicodedata
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any, Tuple
+from collections import deque
 import PyPDF2
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
-import re
-import sqlite3
-import contextlib
-from pathlib import Path
-import hashlib
-import traceback
-import unicodedata
-
-import logging
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
-from collections import deque
-import asyncio
-import aiohttp
-import time
 import structlog
 import pybreaker
 from rich.console import Console
@@ -73,7 +65,7 @@ def setup_comprehensive_logging():
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
+        structlog.processors.ExceptionRenderer(),
         structlog.processors.UnicodeDecoder(),
     ]
 
@@ -90,10 +82,12 @@ def setup_comprehensive_logging():
     # إعداد Formatter لملفات السجل (JSON) و Formatter للطرفية (Rich)
     json_formatter = structlog.stdlib.ProcessorFormatter(
         processor=structlog.processors.JSONRenderer(ensure_ascii=False),
+        foreign_pre_chain=shared_processors,
     )
 
     console_formatter = structlog.stdlib.ProcessorFormatter(
         processor=structlog.dev.ConsoleRenderer(colors=True),
+        foreign_pre_chain=shared_processors,
     )
 
     # إعداد logger الرئيسي مع rotation
@@ -834,16 +828,16 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyCoKRKqxBAW5kjeVR5saa8",
-            "AIzaSyBOg7Fcc9qum6HzqgVXj20Rg",
-            "AIzaSyCq96pXxveGaUl2zfu8Lms",
-            "AIzaSyAQEIPnASJKmG22jLfgt4C7pQ",
-            "AIzaSyDcE4H4B5Jzy3irwfrVTVM0Zg",
-            "AIzaSyAiHCZHptFnQioO-guNyxZC0",
-            "AIzaSyBWoJ1JToWqsvRGqLUJfRlyU",
-            "AIzaSyAUcgeEdeu5EB3lhfYDG_A",
-            "AIzaSyDyScB6V94og6ypaaQ6Sj2i3A",
-            "AIzaSyCEK4C8TkEYftcj9OEoprFaM",
+            "AIzaSyCoKRKqxBaa8",
+            "AIzaSyBOg7Fcc9qum0Rg",
+            "AIzaSyCq96pXxveGaUZms",
+            "AIzaSyAQEIPnASJKmG227pQ",
+            "AIzaSyDcE4H4B5Jzy3irwfrV0Zg",
+            "AIzaSyAiHCZHptFnQioO-guNZC0",
+            "AIzaSyBWoJ1JToWqsvRGqLUJfRJyU",
+            "AIzaSyAUcgeEdeu5EB3lhfYDGdkIHp",
+            "AIzaSyDyScB6V94og6ypaaQ6Sj2BZi3",
+            "AIzaSyCEK4C8TkEYftcj9OEoprF",
             
 
         ]
@@ -866,7 +860,7 @@ class EnhancedGeminiAPI:
         # التوزيع الدائري
         self.current_key_index = 0
 
-        # إعدادات الAPI لـ Gemini 2.5 Pro
+        # إعدادات الAPI لـ Gemini 2.5 Flash
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.max_retries = 6
         self.retry_delays = [3, 6, 12, 24, 48, 96]
@@ -885,6 +879,9 @@ class EnhancedGeminiAPI:
             "complete_translation":      {"topK": 20, "topP": 0.9},
             "contextual_translation":    {"topK": 20, "topP": 0.9},
             "chapter_title_translation": {"topK": 20, "topP": 0.9},
+            # ترجمة القطع الكبيرة chunk-based — نفس إعدادات الترجمة الأدبية
+            "chunk_translation":         {"topK": 20, "topP": 0.9},
+            "subchunk_translation":      {"topK": 20, "topP": 0.9},
             # استخراج المصطلحات — دقة عالية، تنوع منخفض
             "terminology_extraction":    {"topK": 10, "topP": 0.7},
             "term_extraction":           {"topK": 10, "topP": 0.7},
@@ -894,22 +891,19 @@ class EnhancedGeminiAPI:
             "final_completion":          {"topK": 8,  "topP": 0.6},
             "final_cleanup":             {"topK": 8,  "topP": 0.6},
             "final_review":              {"topK": 8,  "topP": 0.6},
+            # التصحيح المستهدف للجمل المشكلة — دقة قصوى
+            "targeted_correction":       {"topK": 8,  "topP": 0.6},
         }
         # الإعدادات الافتراضية لأي نوع طلب غير مصنَّف
         self._default_profile: Dict[str, Any] = {"topK": 12, "topP": 0.8}
 
-        # ---- Circuit Breakers: واحد لكل مفتاح ----
+        # ---- Circuit Breakers: تطبيق داخلي بديل عن pybreaker لتجنب تعارض async ----
         # بعد 5 فشل حقيقي متتالٍ → يُوقَف المفتاح 5 دقائق (300 ثانية)
-        # ثم يدخل HALF-OPEN: طلب واحد للاختبار، إن نجح → CLOSED، وإلا → OPEN من جديد
-        self.circuit_breakers: Dict[str, pybreaker.CircuitBreaker] = {
-            key: pybreaker.CircuitBreaker(
-                fail_max=5,
-                reset_timeout=300,
-                name=f"cb_{key[:10]}"
-            )
-            for key in self.api_keys
-        }
-        logger.info(f"Circuit Breakers initialized: {len(self.circuit_breakers)} breakers (fail_max=5, timeout=300s)")
+        # _cb_open_until: {key → timestamp_until_open}
+        self._cb_open_until: Dict[str, float] = {}
+        # نُبقي circuit_breakers للتوافق مع الكود الخارجي (القراءة فقط)
+        self.circuit_breakers: Dict[str, Any] = {}
+        logger.info(f"Internal Circuit Breakers initialized: fail_max=5, timeout=300s")
     
     async def _ensure_session(self):
         """التأكد من وجود جلسة HTTP نشطة مع connection pooling"""
@@ -970,15 +964,13 @@ class EnhancedGeminiAPI:
                 if key in self.blocked_keys:
                     continue
 
-                # تخطي المفاتيح التي فتح دائرتها (Circuit Breaker OPEN)
-                cb = self.circuit_breakers.get(key)
-                if cb is not None:
-                    try:
-                        cb_state = str(cb.current_state).lower()
-                        if "open" in cb_state and "half" not in cb_state:
-                            continue
-                    except Exception:
-                        pass
+                # تخطي المفاتيح التي فتح دائرتها (Circuit Breaker داخلي)
+                if key in self._cb_open_until:
+                    if time.time() < self._cb_open_until[key]:
+                        continue
+                    else:
+                        # انتهت فترة الإيقاف → HALF_OPEN: نسمح بمرور طلب واحد
+                        del self._cb_open_until[key]
 
                 # التحقق من rate limit
                 if not self.rate_limiters[key].can_make_request(estimated_tokens):
@@ -1024,8 +1016,8 @@ class EnhancedGeminiAPI:
             # Loop will continue
     
     async def make_precision_request(self, prompt: str, system_instruction: str = "", 
-                                   temperature: float = 0.05, max_tokens: int = 8192,
-                                   request_type: str = "translation") -> Optional[str]:
+                                   temperature: float = 0.05, max_tokens: int = 16384,
+                                   request_type: str = "translation") -> Tuple[Optional[str], float, Optional[str]]:
         """
         إرسال طلب دقيق مع تحسينات شاملة:
           ✅ systemInstruction كحقل مستقل في payload (وزن أعلى لدى النموذج)
@@ -1095,15 +1087,13 @@ class EnhancedGeminiAPI:
 
             url = f"{self.base_url}?key={api_key}"
 
-            # --- تغليف طلب HTTP بـ Circuit Breaker ---
-            cb = self.circuit_breakers[api_key]
+            # --- تنفيذ طلب HTTP مع Circuit Breaker داخلي ---
             result_holder: Dict[str, Any] = {}
 
             async def _api_call():
                 """
-                دالة داخلية يُغلّفها Circuit Breaker.
-                ترفع _CircuitBreakerKeyError عند أي فشل حقيقي (server/network/invalid key)
-                حتى يحسبه pybreaker ضمن عداد الفشل.
+                دالة داخلية تنفذ طلب HTTP وترفع _CircuitBreakerKeyError
+                عند أي فشل حقيقي (server/network/invalid key).
                 لا ترفع استثناءً للـ 429 (rate limit) — يُعالج بشكل منفصل.
                 """
                 try:
@@ -1137,7 +1127,7 @@ class EnhancedGeminiAPI:
                     f"key={api_key[:10]}... "
                     f"maxTokens={dynamic_max_tokens} topK={profile['topK']} topP={profile['topP']}"
                 )
-                await cb(_api_call)()
+                await _api_call()
 
                 response_time = time.time() - request_start
 
@@ -1184,19 +1174,6 @@ class EnhancedGeminiAPI:
                     self.blocked_keys[api_key] = time.time() + block_duration
                     await asyncio.sleep(block_duration)
 
-            except pybreaker.CircuitBreakerError:
-                # الدائرة مفتوحة — المفتاح موقوف، ننتقل للمحاولة التالية
-                elapsed = time.time() - request_start
-                logger.warning(
-                    f"[CircuitBreaker] Circuit OPEN for key {api_key[:10]} "
-                    f"(fail_max=5 reached). Skipping to next key. elapsed={elapsed:.2f}s"
-                )
-                console.print(
-                    f"[bold red]⚡ Circuit Breaker OPEN: key {api_key[:10]} "
-                    f"suspended for {cb.reset_timeout}s[/bold red]"
-                )
-                continue  # جرّب مفتاحاً آخر
-
             except _CircuitBreakerKeyError as e:
                 # فشل حقيقي — سجّل وعالج حسب نوع الخطأ
                 response_time = time.time() - request_start
@@ -1211,6 +1188,19 @@ class EnhancedGeminiAPI:
                     console.print(
                         f"[bold red]⚠️ Alert: Key {api_key[:10]} is facing consecutive {error_type} errors![/bold red]"
                     )
+
+                # Circuit Breaker داخلي: فتح الدائرة عند 5 إخفاقات متتالية (300 ثانية)
+                consec = self.key_stats[api_key].consecutive_failures
+                if consec >= 5 and api_key not in self._cb_open_until:
+                    self._cb_open_until[api_key] = time.time() + 300
+                    logger.warning(
+                        f"[CircuitBreaker] Circuit OPEN for key {api_key[:10]} "
+                        f"({consec} consecutive failures). Suspended for 300s."
+                    )
+                    console.print(
+                        f"[bold red]⚡ Circuit Breaker OPEN: key {api_key[:10]} suspended for 300s[/bold red]"
+                    )
+                    continue  # جرّب مفتاحاً آخر
 
                 if error_type == "timeout":
                     logger.warning(f"Request {request_type} timed out (attempt {attempt+1})")
@@ -1414,7 +1404,7 @@ class ComprehensiveContentProcessor:
         if not self._langdetect_available or len(sentence.strip()) < 8:
             return 'unknown'
         try:
-            from langdetect import detect, LangDetectException
+            from langdetect import detect
             return detect(sentence.strip())
         except Exception:
             return 'unknown'
@@ -2092,51 +2082,112 @@ class CompleteTranslationEngine:
     #  ⑥ استخراج المصطلحات من رد الترجمة (بدون API منفصل)
     # ════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """
+        يستخرج أول كائن JSON متوازن الأقواس من النص.
+
+        لماذا هذه الطريقة؟
+        الـ regex البسيط يرفض أي أقواس داخلية،
+        لذا يفشل مع JSON المتداخل مثل {"terms":{"key":"val"}}.
+        هذه الدالة تتتبع عمق الأقواس بدقة مع دعم السلاسل النصية
+        والأحرف المهرّبة لضمان الاستخراج الصحيح دائماً.
+        """
+        start = text.find('{')
+        if start == -1:
+            return ''
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start: i + 1]
+        return ''
+
+    @staticmethod
+    def _safe_json_load(text: str) -> dict:
+        """
+        استخراج JSON آمن بمحاولتين:
+        ① _extract_first_json_object (يتعامل مع JSON متداخل وعلى يمينه نص)
+        ② json.loads مباشرة كـ fallback
+        """
+        candidate = CompleteTranslationEngine._extract_first_json_object(text)
+        if candidate:
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+        try:
+            return json.loads(text.strip())
+        except Exception:
+            return {}
+
     def _parse_terms_from_response(self, response: str) -> Tuple[str, int]:
         """
         يفصل النص المترجم عن قسم JSON المصطلحات في نفس الرد.
         يُعيد (cleaned_translation, terms_count).
-        مصطلحات مكررة في 3+ فصول → ثقة عالية (إلزامية).
-        مصطلحات ظهرت مرة → ثقة منخفضة (اقتراحات).
+
+        الإصلاح:
+        ─────────
+        يستخدم _extract_first_json_object بدلاً من regex [^{}]*
+        الذي كان يفشل مع أي JSON متداخل → لم يُستخرج أي مصطلح أبداً.
+
+        مصطلحات مكررة (تردد عالٍ) → إلزامية في system instruction.
+        مصطلحات لمرة واحدة → تُسجَّل بثقة منخفضة.
         """
-        if 'TERMS_JSON:' not in response:
+        if not response or 'TERMS_JSON:' not in response:
             return response, 0
 
         parts = response.split('TERMS_JSON:', 1)
         translation_clean = parts[0].strip()
         terms_raw = parts[1].strip()
 
-        # استخرج الكائن JSON الأول فقط
         terms_count = 0
         try:
-            json_match = re.search(r'\{[^{}]*\}', terms_raw, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                terms = data.get('terms', {})
-                for english, arabic in terms.items():
-                    english = str(english).strip()
-                    arabic = str(arabic).strip()
-                    if english and arabic and len(english) > 2:
-                        self.terminology_database[english] = arabic
-                        self.term_frequency[english] = (
-                            self.term_frequency.get(english, 0) + 1
-                        )
-                        terms_count += 1
-                        # تحديث ملف معرفة الكتاب: شخصية أو مكان؟
-                        if english.istitle() or english[0].isupper():
-                            if ' ' not in english.strip():
-                                if english not in self.book_knowledge['characters']:
-                                    self.book_knowledge['characters'][english] = {
-                                        'arabic': arabic, 'description': ''
-                                    }
-                            else:
-                                if english not in self.book_knowledge['places']:
-                                    self.book_knowledge['places'][english] = arabic
+            data = self._safe_json_load(terms_raw)
+            terms = data.get('terms', {})
+            for english, arabic in terms.items():
+                english = str(english).strip()
+                arabic  = str(arabic).strip()
+                if english and arabic and len(english) > 2:
+                    self.terminology_database[english] = arabic
+                    self.term_frequency[english] = (
+                        self.term_frequency.get(english, 0) + 1
+                    )
+                    terms_count += 1
+                    # تحديث ملف معرفة الكتاب
+                    if english and (english.istitle() or english[0].isupper()):
+                        if ' ' not in english.strip():
+                            if english not in self.book_knowledge['characters']:
+                                self.book_knowledge['characters'][english] = {
+                                    'arabic': arabic, 'description': ''
+                                }
+                        else:
+                            if english not in self.book_knowledge['places']:
+                                self.book_knowledge['places'][english] = arabic
         except Exception as e:
             logger.debug(f"[Terms] JSON parse warning: {e}")
 
         if terms_count:
-            logger.info(f"[Terms] ⑥ Extracted {terms_count} terms inline (no extra API call)")
+            logger.info(
+                f"[Terms] ⑥ Extracted {terms_count} terms inline "
+                f"(no extra API call) | total_db={len(self.terminology_database)}"
+            )
 
         return translation_clean, terms_count
 
@@ -2189,25 +2240,42 @@ class CompleteTranslationEngine:
         ④ المرحلة 3 (API فقط عند الحاجة):
         يرسل الجمل المشكلة فقط (لا النص الكامل) للنموذج للتصحيح.
         المرحلة 4: يدمج الإصلاحات في النص الكامل.
+
+        الإصلاحات:
+        ──────────
+        Bug #2: مثال الـ JSON الآن يستخدم الـ indices الحقيقية (لا 0,1,2 الوهمية)
+                حتى يفهم النموذج أن المطلوب keys بالأرقام الفعلية للجمل.
+        Bug #3: استخدام _safe_json_load بدلاً من regex جشع مع DOTALL
+                الذي كان يفشل عند وجود أقواس عربية بعد الـ JSON.
         """
         if not problematic:
             return full_translation
 
-        # بناء prompt مضغوط يحتوي الجمل المشكلة فقط
-        req_lines = ["صحح الجمل التالية: ترجم الكلمات الإنجليزية إلى العربية فقط.\n"]
-        for item in problematic[:12]:   # حد أقصى 12 جملة في طلب واحد
+        batch = problematic[:12]   # حد أقصى 12 جملة في طلب واحد
+
+        # بناء مثال JSON ديناميكي من الـ indices الحقيقية (Bug #2 Fix)
+        example_keys = {str(p['index']): "الجملة المصححة هنا" for p in batch[:2]}
+        example_json  = json.dumps({"corrections": example_keys}, ensure_ascii=False)
+
+        req_lines = [
+            "صحح الجمل التالية: ترجم الكلمات الإنجليزية المُشار إليها إلى العربية.",
+            f"أجب بـ JSON فقط بهذا الشكل: {example_json}",
+            ""
+        ]
+        for item in batch:
             req_lines.append(
                 f"جملة_{item['index']}: {item['sentence']}\n"
-                f"  كلمات مشكلة: {', '.join(item['issues'])}"
+                f"  كلمات تحتاج ترجمة: {', '.join(item['issues'])}"
             )
         req_lines.append(
-            '\nأجب بـ JSON فقط:\n{"corrections":{"0":"الجملة المصححة","1":"..."}}'
+            f'\nالرد (JSON فقط بـ keys هي أرقام الجمل أعلاه):'
         )
 
         targeted_prompt = '\n'.join(req_lines)
         targeted_sys = (
-            "أنت مصحح ترجمة. مهمتك الوحيدة: ترجمة الكلمات الإنجليزية المشكلة. "
-            "أجب بـ JSON فقط بدون أي نص إضافي."
+            "أنت مصحح ترجمة دقيق. مهمتك الوحيدة: ترجمة الكلمات الإنجليزية المُحددة "
+            "وإعادة الجملة كاملة بالعربية. أجب بـ JSON فقط، "
+            "لا تكتب أي نص قبل الـ JSON أو بعده."
         )
 
         result = await self.api_manager.make_precision_request(
@@ -2217,31 +2285,36 @@ class CompleteTranslationEngine:
             request_type="targeted_correction"
         )
 
-        if not result:
+        response_text, _, _ = result
+        if not response_text:
             return full_translation
 
-        response_text, _, _ = result
-
-        # ── المرحلة 4: دمج التصحيحات في النص الكامل ──
+        # ── المرحلة 4: دمج التصحيحات (Bug #3 Fix: safe JSON extraction) ──
         try:
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if not json_match:
+            parsed = self._safe_json_load(response_text)
+            corrections: Dict[str, str] = parsed.get('corrections', {})
+
+            if not corrections:
+                logger.warning(
+                    "[TargetedCorrection] No corrections found in response, "
+                    "returning original"
+                )
                 return full_translation
 
-            corrections: Dict[str, str] = json.loads(
-                json_match.group()
-            ).get('corrections', {})
-
             sentences = re.split(r'(?<=[.!?؟!])\s+', full_translation)
-            for item in problematic:
+            applied = 0
+            for item in batch:
                 key = str(item['index'])
                 if key in corrections and item['index'] < len(sentences):
-                    sentences[item['index']] = corrections[key]
+                    corr = corrections[key].strip()
+                    if corr:  # لا نستبدل بجملة فارغة
+                        sentences[item['index']] = corr
+                        applied += 1
 
             merged = ' '.join(sentences)
             logger.info(
-                f"[TargetedCorrection] ④ Applied {len(corrections)} targeted fixes "
-                f"(sent only {len(problematic)} sentences vs full text)"
+                f"[TargetedCorrection] ④ Applied {applied}/{len(batch)} targeted fixes "
+                f"(sent only {len(batch)} sentences vs full text)"
             )
             return merged
 
@@ -2364,20 +2437,26 @@ class CompleteTranslationEngine:
                     )
                     sub_trans, _, _ = sub_result if sub_result else (None, 0.0, None)
                     if sub_trans:
-                        sub_trans, _ = self._parse_terms_from_response(
+                        # ⑥ استخراج المصطلحات هنا — لا نُكرر الاستخراج بعدها
+                        sub_trans_clean, _ = self._parse_terms_from_response(
                             sub_trans.replace("###TRUNCATED###", "").strip()
                         )
-                        sub_results.append(sub_trans)
-                        running_context = sub_trans[-300:]
+                        sub_results.append(sub_trans_clean)
+                        running_context = sub_trans_clean[-300:]
 
                 if sub_results:
+                    # المصطلحات استُخرجت بالفعل في الحلقة أعلاه
                     chunk_translation = '\n\n'.join(sub_results)
 
             if chunk_translation:
-                # ⑥ استخراج المصطلحات من الرد مباشرة
-                clean, _ = self._parse_terms_from_response(
-                    chunk_translation.replace("###TRUNCATED###", "").strip()
-                )
+                # ⑥ استخراج المصطلحات من الرد (فقط إذا لم تُعالَج كـ sub_results أعلاه)
+                # sub_results جاهزة ونظيفة بالفعل؛ هذا المسار للحالة العادية (بدون truncation)
+                clean_chunk = chunk_translation.replace("###TRUNCATED###", "").strip()
+                if sub_results:
+                    # المصطلحات استُخرجت في حلقة sub_results — نتجنب الاستدعاء المكرر
+                    clean = clean_chunk
+                else:
+                    clean, _ = self._parse_terms_from_response(clean_chunk)
                 translated_chunks.append(clean)
                 # تحديث الجسر السياقي: آخر 300 حرف
                 running_context = clean[-300:]
@@ -2493,8 +2572,8 @@ class CompleteTranslationEngine:
                     temperature=0.05,
                     request_type="completion_review"
                 )
-                if review_result:
-                    reviewed, r_t, r_k = review_result
+                reviewed, r_t, r_k = review_result
+                if reviewed:
                     if r_t: response_time += r_t
                     if r_k: api_key_used = r_k
                     reviewed, _ = self._parse_terms_from_response(reviewed)
@@ -2582,7 +2661,7 @@ class CompleteTranslationEngine:
             )
             if initial_translation:
                 # ⑥ استخراج المصطلحات من نفس الرد
-                initial_translation, terms_count = self._parse_terms_from_response(
+                initial_translation, _terms_count = self._parse_terms_from_response(
                     initial_translation.replace("###TRUNCATED###", "").strip()
                 )
 
@@ -2632,13 +2711,11 @@ class CompleteTranslationEngine:
                     temperature=0.02,
                     request_type="final_cleanup"
                 )
-                if cleanup_result:
-                    cleaned, r_t, r_k = cleanup_result
+                cleaned, r_t, r_k = cleanup_result
+                if cleaned:
                     if r_t: response_time += r_t
                     if r_k: api_key_used = r_k
-                    final_translation = (
-                        cleaned if cleaned else fixed
-                    )
+                    final_translation = cleaned
                 else:
                     final_translation = fixed
             else:
@@ -3881,6 +3958,14 @@ async def main():
         print(f"\n❌ Unexpected fatal error: {str(e)}")
         logger.error(f"Error in main: {str(e)}")
         logger.error(traceback.format_exc())
+
+    finally:
+        # تنظيف موارد الشبكة لتجنب "Unclosed client session"
+        try:
+            await system.api_manager.cleanup()
+            logger.info("Network resources cleaned up successfully.")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
