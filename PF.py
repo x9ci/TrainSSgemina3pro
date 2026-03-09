@@ -828,16 +828,16 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyCoKRKqxBaa8",
-            "AIzaSyBOg7Fcc9qum0Rg",
-            "AIzaSyCq96pXxveGaUZms",
-            "AIzaSyAQEIPnASJKmG227pQ",
-            "AIzaSyDcE4H4B5Jzy3irwfrV0Zg",
-            "AIzaSyAiHCZHptFnQioO-guNZC0",
-            "AIzaSyBWoJ1JToWqsvRGqLUJfRJyU",
-            "AIzaSyAUcgeEdeu5EB3lhfYDGdkIHp",
-            "AIzaSyDyScB6V94og6ypaaQ6Sj2BZi3",
-            "AIzaSyCEK4C8TkEYftcj9OEoprF",
+            "AIzaSyCoKRKqxBAW5kjeVR5sVXa8",
+            "AIzaSyBOg7Fcc9qum6HzqgVXj2_7CRg",
+            "AIzaSyCq96pXxveGaUl2zfu8ms",
+            "AIzaSyAQEIPnASJKmG22jLfgt6gTpQ",
+            "AIzaSyDcE4H4B5Jzy3irwfrVIZg",
+            "AIzaSyAiHCZHptFnQioO-guNC0",
+            "AIzaSyBWoJ1JToWqsvRGqLUJfR1yU",
+            "AIzaSyAUcgeEdeu5EB3lhfYDGdk_A",
+            "AIzaSyDyScB6V94og6ypaaQ6Sj3A",
+            "AIzaSyCEK4C8TkEYftcj9OEoprFaM",
             
 
         ]
@@ -2415,6 +2415,10 @@ class CompleteTranslationEngine:
 
             chunk_translation, r_time, a_key = result if result else (None, 0.0, None)
 
+            # تهيئة sub_results قبل الكتلة الشرطية لتجنب UnboundLocalError
+            # عند الحالة العادية (بدون truncation) تبقى قائمة فارغة
+            sub_results: List[str] = []
+
             # ── كشف القطع المُقطوعة ──
             if chunk_translation and "###TRUNCATED###" in chunk_translation:
                 logger.warning(
@@ -2424,7 +2428,6 @@ class CompleteTranslationEngine:
 
                 mid_words = chunk.split()
                 half = len(mid_words) // 2
-                sub_results: List[str] = []
                 for sub_chunk in [' '.join(mid_words[:half]), ' '.join(mid_words[half:])]:
                     s_sys, s_prompt = self.create_complete_translation_prompt(
                         sub_chunk, running_context, text_analysis
@@ -2763,214 +2766,826 @@ class CompleteTranslationEngine:
 
 
 class ProfessionalDocumentProcessor:
-    """معالج المستندات الاحترافي المحسن"""
+    """
+    معالج المستندات الاحترافي المطوّر - النسخة المطوّرة الشاملة
+
+    التطويرات الجوهرية المُطبَّقة:
+    ✅ الطبقة 1 : استخراج نصي بـ pymupdf مع البيانات الطباعية الكاملة
+                 (حجم الخط، نوعه، موضعه، Bold/Italic)
+    ✅ الطبقة 2 : OCR تلقائي بـ easyocr للصفحات المصوَّرة (< 50 حرفاً)
+    ✅ الطبقة 3 : إشعار واضح ومفصَّل عند الملفات المحمية
+    ✅ تراجع آمن لـ PyPDF2 عند غياب pymupdf تماماً
+    ✅ قراءة TOC الداخلي للـ PDF مباشرةً (عند الوجود)
+    ✅ كشف فصول ذكي يعتمد على حجم الخط والموضع والنمط الطباعي
+    ✅ تقسيم نصي يحترم الوحدات السردية ونقاط القطع الطبيعية
+    ✅ فحص سلامة الاستخراج مع إعادة محاولة تلقائية
+    ✅ تنظيف نص محسَّن يُزيل الترويسات/التذييلات وأرقام الصفحات
+    """
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  ثوابت الكلاس
+    # ─────────────────────────────────────────────────────────────────────
+    _MIN_CHARS_PER_PAGE   : int   = 50      # أقل من هذا → صفحة مصوَّرة → OCR
+    _MIN_CHAPTER_WORDS    : int   = 50      # فصل أقل من هذا غير منطقي
+    _MAX_CHAPTER_WORDS    : int   = 20_000  # فصل أكثر من هذا مشبوه
+    _FONT_SIZE_RATIO      : float = 1.25    # نسبة خط العنوان إلى خط النص العادي
+    _SCENE_BREAK_PATTERNS : re.Pattern = re.compile(
+        r'^(\*{3,}|\-{3,}|~{3,}|#{3,}|={3,}|\+{3,}|◆+|◇+|•{3,})$'
+    )
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  استيراد المكتبات الاختيارية
+    # ─────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def smart_text_division(text: str, target_chunk_size: int = 5000) -> List[Dict[str, Any]]:
-        """تقسيم ذكي للنص إلى أجزاء منطقية مع حفظ التماسك"""
-        
-        # تقسيم إلى فقرات
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        
-        chapters = []
-        current_chapter = {
-            'id': 'chapter_001',
-            'title': 'الجزء الأول',
-            'content': '',
-            'word_count': 0,
-            'start_page': 1,
-            'end_page': 1
+    def _import_fitz() -> Optional[Any]:
+        """استيراد pymupdf (fitz) مع رسالة إرشادية واضحة عند غيابه."""
+        try:
+            import fitz  # type: ignore
+            return fitz
+        except ImportError:
+            logger.warning(
+                "[ProfessionalDocumentProcessor] pymupdf غير مثبَّت. "
+                "لتفعيل الاستخراج المتقدم نفِّذ: pip install pymupdf"
+            )
+            return None
+
+    @staticmethod
+    def _import_easyocr() -> Optional[Any]:
+        """استيراد easyocr بصمت عند غيابه (مكتبة اختيارية)."""
+        try:
+            import easyocr  # type: ignore
+            return easyocr
+        except ImportError:
+            return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  الطبقة 1: الاستخراج المتقدم بـ pymupdf
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_layer1_fitz(file_path: str) -> Dict[str, Any]:
+        """
+        الطبقة 1: استخراج نصي كامل بـ pymupdf.
+        يعيد قاموساً يتضمن:
+          pages           – قائمة بيانات الصفحات (نص + بلوكات + عناوين مكتشفة)
+          toc             – جدول محتويات داخلي للملف
+          metadata        – بيانات الملف (العنوان، المؤلف …)
+          total_pages     – عدد الصفحات الكلي
+          is_protected    – هل الملف محمي بكلمة مرور؟
+          needs_ocr_pages – أرقام الصفحات التي تحتاج OCR
+        """
+        fitz = ProfessionalDocumentProcessor._import_fitz()
+        if fitz is None:
+            return {"error": "pymupdf_missing"}
+
+        result: Dict[str, Any] = {
+            "pages":           [],
+            "toc":             [],
+            "metadata":        {},
+            "total_pages":     0,
+            "is_protected":    False,
+            "needs_ocr_pages": [],
         }
-        
+
+        try:
+            doc = fitz.open(file_path)
+        except Exception as exc:
+            logger.error(f"[Layer1] فشل فتح الملف: {exc}")
+            return {"error": str(exc)}
+
+        result["total_pages"] = len(doc)
+
+        # ── الملف المحمي ──────────────────────────────────────────────
+        if doc.needs_pass:
+            result["is_protected"] = True
+            doc.close()
+            return result
+
+        # ── الميتاداتا ────────────────────────────────────────────────
+        meta = doc.metadata or {}
+        result["metadata"] = {
+            "title":    meta.get("title",    ""),
+            "author":   meta.get("author",   ""),
+            "subject":  meta.get("subject",  ""),
+            "keywords": meta.get("keywords", ""),
+            "creator":  meta.get("creator",  ""),
+        }
+
+        # ── TOC الداخلي ───────────────────────────────────────────────
+        try:
+            toc_raw = doc.get_toc(simple=False)  # [(level, title, page, dest), ...]
+            result["toc"] = [
+                {"level": item[0], "title": item[1], "page": item[2]}
+                for item in toc_raw
+                if item[1] and item[1].strip()
+            ]
+            if result["toc"]:
+                logger.info(f"[Layer1] TOC داخلي: {len(result['toc'])} إدخال")
+        except Exception:
+            pass
+
+        # ── استخراج الصفحات (حلقة واحدة تجمع الخطوط والبيانات معاً) ──
+        # المرور الأول: جمع أحجام الخطوط لحساب المنوال
+        all_font_sizes: List[float] = []
+        # تخزين raw_dict لكل صفحة لتجنب القراءة المزدوجة
+        pages_raw: List[Optional[Any]] = [None] * len(doc)
+
+        try:
+            for page_idx in range(len(doc)):
+                try:
+                    page_obj = doc[page_idx]
+                    raw_dict = page_obj.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+                    pages_raw[page_idx] = raw_dict
+                    for blk in raw_dict.get("blocks", []):
+                        if blk.get("type") != 0:
+                            continue
+                        for line in blk.get("lines", []):
+                            for span in line.get("spans", []):
+                                sz = span.get("size", 0)
+                                if 6.0 <= sz <= 72.0:
+                                    all_font_sizes.append(sz)
+                except Exception:
+                    pass
+
+            body_font_size: float = 12.0
+            if all_font_sizes:
+                from collections import Counter
+                size_counter = Counter(round(s, 1) for s in all_font_sizes)
+                body_font_size = float(size_counter.most_common(1)[0][0])
+            logger.info(f"[Layer1] حجم خط النص الأساسي: {body_font_size}pt")
+
+            # المرور الثاني: بناء بيانات الصفحات من الـ raw_dict المحفوظة
+            for page_idx, raw_dict in enumerate(pages_raw):
+                if raw_dict is None:
+                    continue
+                try:
+                    plain_text = ""
+                    page_blocks: List[Dict[str, Any]] = []
+                    potential_headings: List[str] = []
+
+                    for blk in raw_dict.get("blocks", []):
+                        if blk.get("type") != 0:
+                            continue
+
+                        block_text = ""
+                        block_max_font: float = 0.0
+                        is_bold = False
+
+                        for ln in blk.get("lines", []):
+                            line_text = ""
+                            for span in ln.get("spans", []):
+                                span_text  = span.get("text", "")
+                                span_size  = span.get("size", 0.0)
+                                span_flags = span.get("flags", 0)
+                                line_text += span_text
+                                if span_size > block_max_font:
+                                    block_max_font = span_size
+                                if span_flags & 16:   # bit 4 = Bold في pymupdf
+                                    is_bold = True
+                            block_text += line_text.strip() + "\n"
+
+                        block_text = block_text.strip()
+                        if not block_text:
+                            continue
+
+                        font_ratio = (block_max_font / body_font_size) if body_font_size > 0 else 1.0
+                        is_heading = (
+                            font_ratio >= ProfessionalDocumentProcessor._FONT_SIZE_RATIO
+                            and len(block_text.split()) <= 20
+                            and len(block_text) >= 3
+                            and (is_bold or font_ratio >= 1.4)
+                        )
+
+                        if is_heading:
+                            potential_headings.append(block_text.strip())
+
+                        page_blocks.append({
+                            "text":       block_text,
+                            "font_size":  block_max_font,
+                            "is_bold":    is_bold,
+                            "is_heading": is_heading,
+                            "y_pos":      blk.get("bbox", [0, 0, 0, 0])[1],
+                        })
+                        plain_text += block_text + "\n\n"
+
+                    page_text_stripped = plain_text.strip()
+                    needs_ocr = len(page_text_stripped) < ProfessionalDocumentProcessor._MIN_CHARS_PER_PAGE
+
+                    result["pages"].append({
+                        "page_number":        page_idx + 1,
+                        "text":               page_text_stripped,
+                        "blocks":             page_blocks,
+                        "potential_headings": potential_headings,
+                        "needs_ocr":          needs_ocr,
+                    })
+                    if needs_ocr:
+                        result["needs_ocr_pages"].append(page_idx + 1)
+
+                except Exception as exc:
+                    logger.warning(f"[Layer1] خطأ في الصفحة {page_idx + 1}: {exc}")
+
+        finally:
+            doc.close()   # مضمون الإغلاق حتى عند أي exception غير متوقع
+
+        return result
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  الطبقة 2: OCR للصفحات المصوَّرة
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_layer2_ocr(
+        file_path: str, page_numbers: List[int]
+    ) -> Dict[int, str]:
+        """
+        الطبقة 2: OCR بـ easyocr للصفحات التي أعادت نصاً قصيراً جداً.
+        يعيد {رقم_الصفحة: النص_المستخرج}.
+        """
+        if not page_numbers:
+            return {}
+
+        easyocr_mod = ProfessionalDocumentProcessor._import_easyocr()
+        fitz        = ProfessionalDocumentProcessor._import_fitz()
+
+        if easyocr_mod is None or fitz is None:
+            logger.warning(
+                "[Layer2] easyocr أو pymupdf غير متاح — تخطّي OCR. "
+                "للتثبيت: pip install easyocr"
+            )
+            return {}
+
+        ocr_results: Dict[int, str] = {}
+        logger.info(f"[Layer2] تشغيل OCR على {len(page_numbers)} صفحة مصوَّرة …")
+
+        try:
+            reader = easyocr_mod.Reader(["ar", "en"], gpu=False, verbose=False)
+        except Exception as exc:
+            logger.warning(f"[Layer2] فشل تهيئة easyocr: {exc}")
+            return {}
+
+        try:
+            doc = fitz.open(file_path)
+            try:
+                for pn in page_numbers:
+                    try:
+                        page      = doc[pn - 1]
+                        mat       = fitz.Matrix(2, 2)   # دقة مضاعفة تُحسِّن OCR
+                        pix       = page.get_pixmap(matrix=mat)
+                        img_bytes = pix.tobytes("png")
+
+                        import io
+                        import numpy as np
+                        from PIL import Image
+                        img       = Image.open(io.BytesIO(img_bytes))
+                        img_array = np.array(img)
+
+                        ocr_lines = reader.readtext(img_array, detail=0, paragraph=True)
+                        ocr_text  = "\n".join(ocr_lines)
+
+                        if ocr_text.strip():
+                            ocr_results[pn] = ocr_text
+                            logger.info(f"[Layer2] OCR صفحة {pn}: {len(ocr_text)} حرف")
+                        else:
+                            logger.warning(f"[Layer2] OCR لم يجد نصاً في الصفحة {pn}")
+
+                    except Exception as exc:
+                        logger.warning(f"[Layer2] خطأ OCR صفحة {pn}: {exc}")
+            finally:
+                doc.close()   # مضمون الإغلاق حتى عند أي exception غير متوقع
+        except Exception as exc:
+            logger.error(f"[Layer2] خطأ عام OCR: {exc}")
+
+        return ocr_results
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  التراجع الآمن: PyPDF2
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_fallback_pypdf2(file_path: str) -> Dict[str, Any]:
+        """
+        تراجع آمن لـ PyPDF2 عند غياب pymupdf.
+        يُرجع نفس هيكل _extract_layer1_fitz لضمان توافق باقي الكود.
+        """
+        logger.warning("[Fallback] استخدام PyPDF2 — النتائج قد تكون أقل دقة")
+        result: Dict[str, Any] = {
+            "pages":           [],
+            "toc":             [],
+            "metadata":        {},
+            "total_pages":     0,
+            "is_protected":    False,
+            "needs_ocr_pages": [],
+        }
+        try:
+            with open(file_path, "rb") as fh:
+                reader = PyPDF2.PdfReader(fh)
+                result["total_pages"] = len(reader.pages)
+
+                if reader.metadata:
+                    meta = dict(reader.metadata)
+                    result["metadata"] = {
+                        "title":  meta.get("/Title",  ""),
+                        "author": meta.get("/Author", ""),
+                    }
+
+                for idx, pg in enumerate(reader.pages):
+                    try:
+                        txt      = pg.extract_text() or ""
+                        needs_ocr = len(txt.strip()) < ProfessionalDocumentProcessor._MIN_CHARS_PER_PAGE
+                        result["pages"].append({
+                            "page_number":       idx + 1,
+                            "text":              txt,
+                            "blocks":            [],
+                            "potential_headings": [],
+                            "needs_ocr":         needs_ocr,
+                        })
+                        if needs_ocr:
+                            result["needs_ocr_pages"].append(idx + 1)
+                    except Exception as exc:
+                        logger.warning(f"[Fallback] خطأ صفحة {idx + 1}: {exc}")
+        except Exception as exc:
+            logger.error(f"[Fallback] خطأ PyPDF2: {exc}")
+            raise
+        return result
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  بناء الفصول من TOC الداخلي
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_chapters_from_toc(
+        toc: List[Dict[str, Any]], pages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        بناء الفصول من TOC الداخلي للـ PDF (المسار الأكثر دقة).
+        يُصفِّي المستويات العليا (level ≤ 2) ليحصل على الفصول الرئيسية.
+        """
+        if not toc:
+            return []
+
+        top_level = [item for item in toc if item.get("level", 1) <= 2] or toc
+        total_pages = len(pages)
+        chapters: List[Dict[str, Any]] = []
+
+        for idx, toc_item in enumerate(top_level):
+            start_pg = max(1, min(toc_item.get("page", 1), total_pages))
+            end_pg   = (
+                max(start_pg, min(top_level[idx + 1].get("page", total_pages) - 1, total_pages))
+                if idx + 1 < len(top_level)
+                else total_pages
+            )
+
+            chapter_text = "\n\n".join(
+                p.get("text", "")
+                for p in pages
+                if start_pg <= p.get("page_number", 0) <= end_pg
+                and p.get("text", "").strip()
+            ).strip()
+
+            if not chapter_text:
+                continue
+
+            chapters.append({
+                "id":         f"chapter_{idx + 1:03d}",
+                "title":      toc_item["title"].strip(),
+                "content":    chapter_text,
+                "start_page": start_pg,
+                "end_page":   end_pg,
+                "word_count": len(chapter_text.split()),
+            })
+
+        logger.info(f"[ChapterDetect/TOC] {len(chapters)} فصل من TOC الداخلي")
+        return chapters
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  بناء الفصول من البيانات الطباعية
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_chapters_from_typography(
+        pages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        كشف الفصول من حجم الخط والموضع الطباعي (يُستخدم عند غياب TOC).
+        يُفضِّل العناوين المكتشفة بالخط، ويتراجع للأنماط النصية الكلاسيكية.
+        """
+        chapters: List[Dict[str, Any]] = []
+        current_chapter: Optional[Dict[str, Any]] = None
         chapter_counter = 1
-        
-        for paragraph in paragraphs:
-            paragraph_words = len(paragraph.split())
-            
-            # إذا إضافة الفقرة ستتجاوز الحد
-            if (current_chapter['word_count'] + paragraph_words > target_chunk_size 
-                and current_chapter['content'].strip()):
-                
-                chapters.append(current_chapter)
-                chapter_counter += 1
-                
+
+        for page_data in pages:
+            page_num  = page_data.get("page_number", 0)
+            page_text = page_data.get("text", "").strip()
+            blocks    = page_data.get("blocks", [])
+
+            if not page_text:
+                continue
+
+            # ── كشف العنوان في هذه الصفحة ──────────────────────────
+            detected_title: Optional[str] = None
+
+            # المسار الأول: عنوان مكتشف بالخط
+            for blk in blocks:
+                if blk.get("is_heading"):
+                    candidate = blk.get("text", "").strip()
+                    if 2 <= len(candidate.split()) <= 15 and len(candidate) >= 3:
+                        detected_title = candidate
+                        break
+
+            # المسار الثاني: أنماط كلاسيكية
+            if not detected_title:
+                for ln in page_text.split("\n"):
+                    ln = ln.strip()
+                    if ProfessionalDocumentProcessor._is_chapter_title_by_pattern(ln):
+                        detected_title = ln
+                        break
+
+            # ── تجميع الفصول ────────────────────────────────────────
+            if detected_title:
+                if current_chapter and current_chapter.get("content", "").strip():
+                    chapters.append(current_chapter)
                 current_chapter = {
-                    'id': f'chapter_{chapter_counter:03d}',
-                    'title': f'الجزء {chapter_counter}',
-                    'content': paragraph,
-                    'word_count': paragraph_words,
-                    'start_page': chapter_counter,
-                    'end_page': chapter_counter
+                    "id":         f"chapter_{chapter_counter:03d}",
+                    "title":      detected_title,
+                    "content":    page_text,
+                    "start_page": page_num,
+                    "end_page":   page_num,
+                    "word_count": len(page_text.split()),
                 }
+                chapter_counter += 1
+            elif current_chapter is not None:
+                current_chapter["content"]   += "\n\n" + page_text
+                current_chapter["end_page"]   = page_num
+                current_chapter["word_count"] = len(current_chapter["content"].split())
             else:
-                if current_chapter['content']:
-                    current_chapter['content'] += '\n\n' + paragraph
-                else:
-                    current_chapter['content'] = paragraph
-                current_chapter['word_count'] += paragraph_words
-        
-        # إضافة الفصل الأخير
-        if current_chapter['content'].strip():
+                current_chapter = {
+                    "id":         f"chapter_{chapter_counter:03d}",
+                    "title":      f"الجزء {chapter_counter}",
+                    "content":    page_text,
+                    "start_page": page_num,
+                    "end_page":   page_num,
+                    "word_count": len(page_text.split()),
+                }
+                chapter_counter += 1
+
+        if current_chapter and current_chapter.get("content", "").strip():
             chapters.append(current_chapter)
-        
+
+        logger.info(f"[ChapterDetect/Typography] {len(chapters)} فصل بالكشف الطباعي")
         return chapters
 
     @staticmethod
-    def extract_pdf_with_precision(file_path: str) -> Dict[str, Any]:
-        """استخراج دقيق للنص مع الحفاظ على البنية"""
-        
-        logger.info(f"Starting processing of PDF file: {file_path}")
-        
-        try:
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                
-                document_info = {
-                    'title': '',
-                    'author': '',
-                    'chapters': [],
-                    'total_pages': len(pdf_reader.pages),
-                    'metadata': {}
-                }
-                
-                # استخراج البيانات الوصفية
-                if pdf_reader.metadata:
-                    document_info['metadata'] = dict(pdf_reader.metadata)
-                    document_info['title'] = pdf_reader.metadata.get('/Title', '')
-                    document_info['author'] = pdf_reader.metadata.get('/Author', '')
-                
-                full_text = ""
-                current_chapter = None
-                chapter_counter = 1
-                
-                for page_num, page in enumerate(pdf_reader.pages):
-                    try:
-                        page_text = page.extract_text()
-                        if not page_text or len(page_text.strip()) < 10:
-                            continue
-                        
-                        # تنظيف النص
-                        page_text = ProfessionalDocumentProcessor.clean_extracted_text(page_text)
-                        
-                        # البحث عن عناوين الفصول
-                        chapter_titles = ProfessionalDocumentProcessor.detect_chapter_titles(page_text)
-                        
-                        if chapter_titles:
-                            # حفظ الفصل السابق
-                            if current_chapter:
-                                document_info['chapters'].append(current_chapter)
-                            
-                            # بدء فصل جديد
-                            for title in chapter_titles:
-                                current_chapter = {
-                                    'id': f'chapter_{chapter_counter:03d}',
-                                    'title': title,
-                                    'content': page_text,
-                                    'start_page': page_num + 1,
-                                    'end_page': page_num + 1,
-                                    'word_count': len(page_text.split())
-                                }
-                                chapter_counter += 1
-                                break
-                        else:
-                            # إضافة للفصل الحالي
-                            if current_chapter:
-                                current_chapter['content'] += "\n\n" + page_text
-                                current_chapter['end_page'] = page_num + 1
-                                current_chapter['word_count'] = len(current_chapter['content'].split())
-                            else:
-                                # إنشاء فصل افتراضي
-                                current_chapter = {
-                                    'id': f'chapter_{chapter_counter:03d}',
-                                    'title': f'الجزء {chapter_counter}',
-                                    'content': page_text,
-                                    'start_page': page_num + 1,
-                                    'end_page': page_num + 1,
-                                    'word_count': len(page_text.split())
-                                }
-                                chapter_counter += 1
-                        
-                        full_text += page_text + "\n\n"
-                        
-                    except Exception as e:
-                        logger.warning(f"Error processing page {page_num + 1}: {str(e)}")
-                        continue
-                
-                # إضافة الفصل الأخير
-                if current_chapter:
-                    document_info['chapters'].append(current_chapter)
-                
-                # إذا لم توجد فصول، تقسيم ذكي
-                if not document_info['chapters']:
-                    document_info['chapters'] = ProfessionalDocumentProcessor.smart_text_division(full_text)
-                
-                logger.info(f"Extracted {len(document_info['chapters'])} chapters from {document_info['total_pages']} pages")
-                
-                # إحصائيات
-                total_words = sum(ch['word_count'] for ch in document_info['chapters'])
-                logger.info(f"Total words: {total_words:,}")
-                
-                return document_info
-                
-        except Exception as e:
-            logger.error(f"Error reading PDF file: {str(e)}")
-            raise
-    
+    def _is_chapter_title_by_pattern(line: str) -> bool:
+        """فحص سريع: هل هذا السطر عنوان فصل بالأنماط الكلاسيكية؟"""
+        if not line or len(line) < 2 or len(line) > 120:
+            return False
+        patterns = [
+            r'^(Chapter|CHAPTER)\s+(\d+|[IVX]+)[\:\.\-\s]*',
+            r'^(الفصل|فصل|القسم|الباب)\s+(\d+|[ا-ي]+)[\:\.\-\s]*',
+            r'^\s*(\d+)[\.\-]\s+.{3,50}$',
+            # الرقم الروماني يجب أن يتبعه نقطة أو شرطة فقط (لا مسافة)
+            # يمنع مطابقة جمل إنجليزية تبدأ بـ "I" كـ "I hate hospitals."
+            r'^\s*([IVX]{1,6})[.\-]\s+.{3,50}$',
+        ]
+        return any(re.match(p, line, re.IGNORECASE) for p in patterns)
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  التقسيم الذكي المحترم للوحدات السردية
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def smart_text_division(
+        text: str, target_chunk_size: int = 5000
+    ) -> List[Dict[str, Any]]:
+        """
+        تقسيم ذكي للنص يحترم الوحدات السردية الطبيعية:
+        ✅ يكتشف فواصل المشاهد (*** --- ~~~) ويقطع عندها
+        ✅ يكمل الفقرة الحالية قبل القطع (لا يكسر الجملة)
+        ✅ لا ينتج جزءاً بحجم صفر
+        ✅ يحافظ على حد الكلمات كحد أقصى لا حد إجباري
+        """
+        paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+        chunks: List[Dict[str, Any]] = []
+        current_parts: List[str] = []
+        current_word_count       = 0
+        chunk_counter            = 1
+
+        def _flush() -> None:
+            nonlocal chunk_counter
+            content = "\n\n".join(current_parts).strip()
+            if not content:
+                return
+            chunks.append({
+                "id":         f"chapter_{chunk_counter:03d}",
+                "title":      f"الجزء {chunk_counter}",
+                "content":    content,
+                "word_count": len(content.split()),
+                "start_page": chunk_counter,
+                "end_page":   chunk_counter,
+            })
+            chunk_counter += 1
+            current_parts.clear()
+
+        for para in paragraphs:
+            para_words = len(para.split())
+            is_scene_break = bool(
+                ProfessionalDocumentProcessor._SCENE_BREAK_PATTERNS.match(para)
+            )
+
+            # فاصل مشهد صريح + تجاوزنا نصف الحجم المستهدف → قطع هنا
+            if is_scene_break and current_word_count >= target_chunk_size // 2:
+                _flush()
+                current_word_count = 0
+                continue  # لا نُضيف رمز الفاصل للنص
+
+            # تجاوز الحجم المستهدف → أنهِ الجزء الحالي ثم ابدأ جديداً
+            if current_word_count + para_words > target_chunk_size and current_parts:
+                _flush()
+                current_word_count = 0
+
+            current_parts.append(para)
+            current_word_count += para_words
+
+        _flush()   # الجزء الأخير
+        return chunks
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  فحص سلامة الاستخراج
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _verify_extraction_integrity(
+        chapters: List[Dict[str, Any]], total_pages: int
+    ) -> Tuple[bool, str]:
+        """
+        فحص منطقية نتائج الاستخراج قبل المتابعة.
+        يُرجع (True, "OK") إذا كانت سليمة، أو (False, سبب_المشكلة) إذا لا.
+        """
+        if not chapters:
+            return False, "لم يُستخرج أي فصل"
+
+        empty = [ch for ch in chapters if ch.get("word_count", 0) == 0]
+        if empty:
+            return False, f"يوجد {len(empty)} فصل فارغ"
+
+        avg_words = sum(ch.get("word_count", 0) for ch in chapters) / len(chapters)
+
+        if avg_words < 30:
+            return False, f"متوسط طول الفصل منخفض جداً: {avg_words:.0f} كلمة"
+
+        if avg_words > ProfessionalDocumentProcessor._MAX_CHAPTER_WORDS:
+            return (
+                False,
+                f"متوسط طول الفصل مرتفع جداً: {avg_words:.0f} كلمة "
+                f"(يُرجَّح فشل اكتشاف الفصول)",
+            )
+
+        if total_pages > 0:
+            pages_per_chapter = total_pages / len(chapters)
+            if pages_per_chapter > 100:
+                return (
+                    False,
+                    f"فصل واحد لكل {pages_per_chapter:.0f} صفحة — "
+                    f"يبدو أن اكتشاف الفصول فشل",
+                )
+
+        return True, "OK"
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  تنظيف النص المستخرج (محسَّن جوهرياً)
+    # ─────────────────────────────────────────────────────────────────────
+
     @staticmethod
     def clean_extracted_text(text: str) -> str:
-        """تنظيف النص المستخرج من PDF"""
-        
-        # إزالة الأسطر المكررة
-        lines = text.split('\n')
-        cleaned_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            if line and len(line) > 2:  # تجنب الأسطر الفارغة أو القصيرة جداً
-                cleaned_lines.append(line)
-        
-        # دمج الأسطر المقطعة
-        merged_text = ""
-        for i, line in enumerate(cleaned_lines):
-            if i > 0 and not line[0].isupper() and not cleaned_lines[i-1].endswith('.'):
-                merged_text += " " + line
+        """
+        تنظيف النص المستخرج من PDF بمنطق محسَّن:
+        ✅ إزالة أرقام الصفحات المنفردة
+        ✅ الحفاظ على فواصل المشاهد (*** --- ~~~)
+        ✅ دمج الأسطر بمنطق يُفرِّق بين العربية والإنجليزية
+        ✅ إزالة الأسطر القصيرة عديمة المعنى
+        ✅ تنظيف المسافات والأسطر الزائدة
+        """
+        if not text:
+            return ""
+
+        lines = text.split("\n")
+        cleaned: List[str] = []
+
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped:
+                continue
+            # الحفاظ على فواصل المشاهد
+            if ProfessionalDocumentProcessor._SCENE_BREAK_PATTERNS.match(stripped):
+                cleaned.append(stripped)
+                continue
+            # إزالة أرقام الصفحات المنفردة
+            if re.match(r'^\d{1,4}$', stripped):
+                continue
+            # تجاهل الأسطر القصيرة جداً
+            if len(stripped) < 3:
+                continue
+            cleaned.append(stripped)
+
+        # ── دمج الأسطر بمنطق سياقي ──────────────────────────────────
+        merged = ""
+        for i, ln in enumerate(cleaned):
+            if not merged:
+                merged = ln
+                continue
+
+            prev = cleaned[i - 1]
+
+            is_scene_break     = ProfessionalDocumentProcessor._SCENE_BREAK_PATTERNS.match(ln)
+            prev_ends_sentence = prev.endswith((".", "؟", "!", ":", "،", "؛"))
+            curr_starts_upper  = ln[0].isupper() if ln[0].isalpha() else False
+            curr_starts_arabic = "\u0600" <= ln[0] <= "\u06FF"
+            prev_is_short      = len(prev) < 40
+
+            if is_scene_break:
+                merged += "\n\n" + ln + "\n\n"
+            elif prev_ends_sentence or prev_is_short or curr_starts_upper:
+                merged += "\n\n" + ln
+            elif curr_starts_arabic:
+                merged += " " + ln
             else:
-                merged_text += "\n\n" + line if merged_text else line
-        
-        # تنظيف إضافي
-        merged_text = re.sub(r'\n{3,}', '\n\n', merged_text)  # إزالة الأسطر الفارغة الزائدة
-        merged_text = re.sub(r' {2,}', ' ', merged_text)      # إزالة المسافات الزائدة
-        
-        return merged_text.strip()
-    
+                merged += " " + ln
+
+        # تنظيف نهائي
+        merged = re.sub(r"\n{3,}", "\n\n", merged)
+        merged = re.sub(r" {2,}",  " ",    merged)
+        merged = re.sub(r"\n ",    "\n",   merged)
+        return merged.strip()
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  detect_chapter_titles — مُبقى للتوافق مع باقي الكود
+    # ─────────────────────────────────────────────────────────────────────
+
     @staticmethod
     def detect_chapter_titles(text: str) -> List[str]:
-        """كشف عناوين الفصول"""
-        
-        lines = text.split('\n')
-        chapter_titles = []
-        
-        # أنماط عناوين الفصول
-        chapter_patterns = [
+        """
+        كشف عناوين الفصول بالأنماط النصية الكلاسيكية.
+        مُبقى للتوافق مع باقي الكود؛ الكشف الرئيسي يتم الآن
+        بواسطة _detect_chapters_from_toc و _detect_chapters_from_typography.
+        """
+        lines  = text.split("\n")
+        titles: List[str] = []
+        patterns = [
             r'^(Chapter|CHAPTER)\s+(\d+|[IVX]+)[\:\.\-\s]*(.*)',
-            r'^(الفصل|فصل)\s+(\d+|[ا-ي]+)[\:\.\-\s]*(.*)',
+            r'^(الفصل|فصل|القسم|الباب)\s+(\d+|[ا-ي]+)[\:\.\-\s]*(.*)',
             r'^\s*(\d+)[\.\-\s](.{5,50})',
-            r'^\s*([IVX]+)[\.\-\s](.{5,50})',
-            r'^([A-Z][A-Z\s]{10,80})',  # عناوين بأحرف كبيرة
+            # الرقم الروماني يجب أن يتبعه نقطة أو شرطة فقط (لا مسافة)
+            # يمنع مطابقة جمل إنجليزية تبدأ بـ "I" كـ "I hate hospitals."
+            r'^\s*([IVX]{1,6})[.\-]\s+(.{5,50})',
+            r'^([A-Z][A-Z\s]{10,80})',
         ]
-        
-        for line in lines:
-            line = line.strip()
-            if len(line) < 3 or len(line) > 100:
+        for ln in lines:
+            ln = ln.strip()
+            if len(ln) < 3 or len(ln) > 100:
                 continue
-            
-            for pattern in chapter_patterns:
-                match = re.match(pattern, line, re.IGNORECASE)
-                if match:
-                    chapter_titles.append(line)
+            for pat in patterns:
+                if re.match(pat, ln, re.IGNORECASE):
+                    titles.append(ln)
                     break
-        
-        return chapter_titles
+        return titles
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  الدالة الرئيسية للاستخراج — الواجهة العامة
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def extract_pdf_with_precision(file_path: str) -> Dict[str, Any]:
+        """
+        استخراج دقيق للنص من PDF بنظام الطبقات الثلاث مع التحقق التلقائي.
+
+        الترتيب:
+          1. pymupdf (أو PyPDF2 تراجعاً)
+          2. OCR بـ easyocr للصفحات المصوَّرة
+          3. إشعار واضح عند الملفات المحمية
+
+        ثم:
+          • قراءة TOC الداخلي وبناء الفصول منه إن وُجد
+          • كشف الفصول طباعياً (حجم الخط) إن لم يوجد TOC
+          • تقسيم ذكي كمسار أخير
+          • فحص سلامة مع إعادة محاولة تلقائية
+        """
+        logger.info(f"[ProfessionalDocumentProcessor] بدء معالجة: {file_path}")
+
+        document_info: Dict[str, Any] = {
+            "title":       "",
+            "author":      "",
+            "chapters":    [],
+            "total_pages": 0,
+            "metadata":    {},
+        }
+
+        fitz_available = ProfessionalDocumentProcessor._import_fitz() is not None
+
+        # ── الطبقة 1 ─────────────────────────────────────────────────
+        raw = (
+            ProfessionalDocumentProcessor._extract_layer1_fitz(file_path)
+            if fitz_available
+            else ProfessionalDocumentProcessor._extract_fallback_pypdf2(file_path)
+        )
+
+        if raw.get("error") and raw["error"] != "pymupdf_missing":
+            logger.error(f"[ProfessionalDocumentProcessor] خطأ في الاستخراج: {raw['error']}")
+            raise RuntimeError(f"فشل استخراج PDF: {raw['error']}")
+
+        if raw.get("is_protected"):
+            logger.error("[ProfessionalDocumentProcessor] الملف محمي بكلمة مرور")
+            raise RuntimeError(
+                "الملف محمي بكلمة مرور. يرجى فكّ الحماية قبل المعالجة.\n"
+                "مثال: qpdf --decrypt input.pdf output.pdf"
+            )
+
+        document_info["total_pages"] = raw.get("total_pages", 0)
+        document_info["metadata"]    = raw.get("metadata", {})
+        document_info["title"]       = raw["metadata"].get("title",  "")
+        document_info["author"]      = raw["metadata"].get("author", "")
+
+        pages: List[Dict[str, Any]] = raw.get("pages", [])
+        toc:   List[Dict[str, Any]] = raw.get("toc",   [])
+
+        # ── الطبقة 2: OCR ────────────────────────────────────────────
+        needs_ocr_pages: List[int] = raw.get("needs_ocr_pages", [])
+        if needs_ocr_pages:
+            logger.info(
+                f"[ProfessionalDocumentProcessor] {len(needs_ocr_pages)} صفحة تحتاج OCR"
+            )
+            ocr_map = ProfessionalDocumentProcessor._extract_layer2_ocr(
+                file_path, needs_ocr_pages
+            )
+            for page_data in pages:
+                pn = page_data["page_number"]
+                if pn in ocr_map:
+                    existing = page_data.get("text", "")
+                    page_data["text"] = (existing + "\n\n" + ocr_map[pn]).strip()
+                    page_data["needs_ocr"] = False
+
+        # ── تنظيف نص الصفحات ─────────────────────────────────────────
+        for page_data in pages:
+            if page_data.get("text"):
+                page_data["text"] = ProfessionalDocumentProcessor.clean_extracted_text(
+                    page_data["text"]
+                )
+
+        # ── بناء الفصول (3 مسارات مُرتَّبة بالأولوية) ───────────────
+        chapters: List[Dict[str, Any]] = []
+
+        if toc:
+            chapters = ProfessionalDocumentProcessor._detect_chapters_from_toc(toc, pages)
+
+        if not chapters and fitz_available:
+            chapters = ProfessionalDocumentProcessor._detect_chapters_from_typography(pages)
+
+        if not chapters:
+            logger.warning(
+                "[ProfessionalDocumentProcessor] فشل اكتشاف الفصول — تفعيل التقسيم الذكي"
+            )
+            full_text = "\n\n".join(
+                p.get("text", "") for p in pages if p.get("text")
+            )
+            chapters = ProfessionalDocumentProcessor.smart_text_division(full_text)
+
+        document_info["chapters"] = chapters
+
+        # ── فحص السلامة مع إعادة المحاولة ───────────────────────────
+        ok, reason = ProfessionalDocumentProcessor._verify_extraction_integrity(
+            chapters, document_info["total_pages"]
+        )
+
+        if not ok:
+            logger.warning(
+                f"[IntegrityCheck] نتائج غير منطقية ({reason}) — إعادة التقسيم الذكي"
+            )
+            full_text = "\n\n".join(
+                p.get("text", "") for p in pages if p.get("text")
+            )
+            chapters = ProfessionalDocumentProcessor.smart_text_division(full_text)
+            document_info["chapters"] = chapters
+
+            ok2, reason2 = ProfessionalDocumentProcessor._verify_extraction_integrity(
+                chapters, document_info["total_pages"]
+            )
+            if ok2:
+                logger.info("[IntegrityCheck] الفحص الثاني: النتائج منطقية بعد إعادة التقسيم")
+            else:
+                logger.error(f"[IntegrityCheck] فشل الفحص الثاني: {reason2}")
+
+        # ── إحصائيات ختامية ──────────────────────────────────────────
+        total_words = sum(ch.get("word_count", 0) for ch in document_info["chapters"])
+        logger.info(
+            f"[ProfessionalDocumentProcessor] اكتمل: "
+            f"{document_info['total_pages']} صفحة | "
+            f"{len(document_info['chapters'])} فصل | "
+            f"{total_words:,} كلمة | "
+            f"OCR: {len(needs_ocr_pages)} صفحة | "
+            f"TOC داخلي: {'✓' if toc else '✗'}"
+        )
+
+        return document_info
 
 
 class EnhancedDocumentGenerator:
