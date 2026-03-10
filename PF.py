@@ -18,6 +18,8 @@ import contextlib
 import hashlib
 import traceback
 import unicodedata
+import argparse
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -33,6 +35,8 @@ import pybreaker
 from rich.console import Console
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
 from rich.logging import RichHandler
+from rich.table import Table
+from rich.panel import Panel
 
 # تهيئة Rich Console للطباعة المنسقة في الطرفية
 console = Console()
@@ -828,14 +832,27 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyCq96pXxveGaUl2zfu8Lms",
-            "AIzaSyAQEIPnASJKmG22jLfgt6gpQ",
-            "AIzaSyDcE4H4B5Jzy3irwfrVIQx7Zg",
-            "AIzaSyAiHCZHptFnQioO-guNyxdC0",
-            "AIzaSyBWoJ1JToWqsvRGqLUJfR1yU",
-            "AIzaSyAUcgeEdeu5EB3lhfYDp_A",
-            "AIzaSyDyScB6V94og6ypaaQ6Sj2BA",
-            "AIzaSyCEK4C8TkEYftcj9OEopzM",
+            "AIzaSyCoKRKqxBAW5kjeVR5sVXRlXjPBaa8",
+            "AIzaSyA9HAxV5Q-3MSnZJqFHHkb1GZ8ie_TI",
+            "AIzaSyBOg7Fcc9qum6HzqgVXj2_O-tQ0Rg",
+            "AIzaSyBzy_wBqit3gMz7v2D20TJ1ryvGIUA",
+            "AIzaSyCKzsBGWQq0fp4s4wMMd9XSL2ZQ",
+            "AIzaSyCkvbUfj-Ck3QWJ88CspKsvl1huPc",
+            "AIzaSyDnX2eJMKnYdjPsSwJXYLCjbCY",
+            "AIzaSyBWoHwS0Wj-dXctJXM_-yqe7vKaQ",
+            "AIzaSyAt-nTf7PWe8rC4ju8d4G50sQ4aLI",
+            "AIzaSyB15sEBm7hrtLWpgBZjxZX5avc8",
+            "AIzaSyAKHuaG7vUXygPxRaOcsr_ndJFyvuk",
+            "AIzaSyBfuBcZETDNN6xvqs3xoYUox9W8E",
+            "AIzaSyBOg7Fcc9qum6HzqgVXj2RRO-tQ0Rg",
+            "AIzaSyCq96pXxveGaUl2zfu8L_AMlXAe19Zms",
+            "AIzaSyAQEIPnASJKmG22jLfYlc1Q4C7pQ",
+            "AIzaSyDcE4H4B5Jzy3irwfrM8u-ZTVM0Zg",
+            "AIzaSyAiHCZHptFnQioO-guNyC0",
+            "AIzaSyBWoJ1JToWqsvRGqLyU",
+            "AIzaSyAUcgeEdeu5EB3lhfYDG_A",
+            "AIzaSyDyScB6V94og6ypaaQ63A",
+            "AIzaSyCEK4C8TkEYftcj9OEopaM",
             
 
         ]
@@ -859,7 +876,7 @@ class EnhancedGeminiAPI:
         self.current_key_index = 0
 
         # إعدادات الAPI لـ Gemini 2.5 Flash
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
         self.max_retries = 6
         self.retry_delays = [3, 6, 12, 24, 48, 96]
         
@@ -4326,18 +4343,25 @@ class EnhancedDocumentGenerator:
 
 class MasterTranslationSystem:
     """النظام الرئيسي الشامل للترجمة عالية الجودة - المحسن"""
-    
+
     def __init__(self, api_keys: List[str], target_language: str = "Arabic"):
         self.api_manager = EnhancedGeminiAPI(api_keys)
         self.translation_engine = CompleteTranslationEngine(self.api_manager, target_language)
         self.document_processor = ProfessionalDocumentProcessor()
         self.document_generator = EnhancedDocumentGenerator()
-        
-        # إعداد قاعدة البيانات
+
+        # إعداد قاعدة البيانات مع فحص السلامة
         self.db_path = "master_translation_enhanced.db"
         self.init_advanced_database()
-        
-        # إحصائيات مفصلة
+
+        # قفل asyncio للحماية الدقيقة عند الحاجة لقسم حرج متعدد الخطوات عبر await.
+        # ملاحظة: asyncio أحادي الخيط (cooperative multitasking) — عمليات القاموس
+        # الأتومية (تعيين/قراءة مفتاح واحد) آمنة بين نقاط await دون قفل.
+        # يُستخدم هذا القفل فقط إذا احتجنا مستقبلاً لقسم read-modify-write
+        # يمتد عبر await (مثلاً: async with _terminology_lock: ... await ... write).
+        self._terminology_lock = asyncio.Lock()
+
+        # إحصائيات مفصلة — كل عملية كتابة محمية بـ GIL في asyncio
         self.translation_stats = {
             'total_chapters': 0,
             'completed_chapters': 0,
@@ -4348,15 +4372,35 @@ class MasterTranslationSystem:
             'translation_start_time': None,
             'estimated_completion_time': None,
             'average_quality_score': 0.0,
+            'quality_scores': [],          # لحساب متوسط حقيقي
             'foreign_content_corrections': 0,
-            'contextual_adaptations': 0
+            'contextual_adaptations': 0,
+            'smart_retries': 0,            # عدد مرات تفعيل الإعادة الذكية
+            'split_recoveries': 0,         # نجاح إستراتيجية التقسيم
+            'rephrasing_recoveries': 0,    # نجاح إستراتيجية إعادة الصياغة
         }
-        
+
         logger.info("Enhanced main system for high-quality translation initialized")
     
     def init_advanced_database(self):
-        """إنشاء قاعدة بيانات متقدمة"""
-        
+        """إنشاء قاعدة بيانات متقدمة مع فحص سلامة عند بدء التشغيل"""
+
+        # ── فحص السلامة أولاً إذا كانت قاعدة البيانات موجودة مسبقاً ─────
+        db_file = Path(self.db_path)
+        if db_file.exists():
+            integrity_ok, integrity_msg = self._verify_db_integrity()
+            if not integrity_ok:
+                logger.warning(
+                    f"[DB] Database integrity check FAILED: {integrity_msg}. "
+                    f"Renaming corrupted DB and starting fresh."
+                )
+                # إعادة تسمية قاعدة البيانات التالفة بدلاً من حذفها
+                backup_name = f"{self.db_path}.corrupted_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                db_file.rename(backup_name)
+                logger.warning(f"[DB] Corrupted DB backed up as: {backup_name}")
+            else:
+                logger.info(f"[DB] Integrity check passed: {integrity_msg}")
+
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             cursor = conn.cursor()
 
@@ -4377,10 +4421,18 @@ class MasterTranslationSystem:
                     translation_time REAL DEFAULT 0.0,
                     foreign_content_detected BOOLEAN DEFAULT 0,
                     corrections_applied INTEGER DEFAULT 0,
+                    retry_strategy TEXT DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # إضافة عمود retry_strategy إذا لم يكن موجوداً (للتوافق مع قواعد بيانات قديمة)
+            try:
+                cursor.execute("ALTER TABLE chapters ADD COLUMN retry_strategy TEXT DEFAULT NULL")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # العمود موجود بالفعل
 
             # جدول المصطلحات المتقدم
             cursor.execute('''
@@ -4429,10 +4481,26 @@ class MasterTranslationSystem:
             conn.commit()
 
         logger.info("Advanced database created and extended with intelligence tables")
+
+    def _verify_db_integrity(self) -> Tuple[bool, str]:
+        """
+        فحص سلامة قاعدة البيانات باستخدام PRAGMA integrity_check.
+        يُعيد (True, 'ok') إذا كانت سليمة، أو (False, رسالة_الخطأ) إذا كانت تالفة.
+        """
+        try:
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")   # وضع Write-Ahead Logging لأفضل موثوقية
+                result = conn.execute("PRAGMA integrity_check").fetchone()
+                if result and result[0] == "ok":
+                    return True, "ok"
+                else:
+                    return False, str(result[0]) if result else "unknown error"
+        except Exception as e:
+            return False, str(e)
     
     def save_chapter_advanced(self, chapter_data: Dict[str, Any]):
-        """حفظ متقدم للفصل مع جميع البيانات"""
-        
+        """حفظ متقدم للفصل مع جميع البيانات بما فيها إستراتيجية الإعادة"""
+
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             cursor = conn.cursor()
 
@@ -4440,8 +4508,8 @@ class MasterTranslationSystem:
                 INSERT OR REPLACE INTO chapters
                 (id, title, original_content, translated_content, word_count, character_count,
                  genre, tone, status, translation_attempts, quality_score, translation_time,
-                 foreign_content_detected, corrections_applied, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 foreign_content_detected, corrections_applied, retry_strategy, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 chapter_data['id'],
                 chapter_data['title'],
@@ -4457,6 +4525,7 @@ class MasterTranslationSystem:
                 chapter_data.get('translation_time', 0.0),
                 chapter_data.get('foreign_content_detected', False),
                 chapter_data.get('corrections_applied', 0),
+                chapter_data.get('retry_strategy', None),
                 datetime.now().isoformat()
             ))
 
@@ -4492,8 +4561,7 @@ class MasterTranslationSystem:
 
     def analyze_and_display_intelligence(self):
         """تحليل البيانات الاستخباراتية من قاعدة البيانات وعرضها باستخدام Rich"""
-        from rich.table import Table
-        from rich.panel import Panel
+        # Table و Panel مستوردان من المستوى الأعلى
 
         console.print("\n[bold cyan]🔍 Extracting intelligence analytics from logs...[/bold cyan]")
 
@@ -4575,15 +4643,338 @@ class MasterTranslationSystem:
             
             return completed_chapters
 
-    async def translate_chapter_comprehensively(self, chapter: Dict[str, Any]) -> Dict[str, Any]:
-        """ترجمة شاملة للفصل مع ضمانات الجودة المحسنة"""
-        
+    # ================================================================== #
+    #  اختبار مفاتيح API                                                  #
+    # ================================================================== #
+
+    async def test_all_api_keys(self) -> Dict[str, bool]:
+        """
+        اختبار جميع مفاتيح API قبل بدء الترجمة وعرض تقرير Rich.
+        يُرسل طلباً تجريبياً بسيطاً لكل مفتاح بالتوازي،
+        ويعرض جدولاً بالحالة والمعدل التاريخي لكل مفتاح.
+
+        يُطلق RuntimeError إذا لم يكن هناك أي مفتاح صالح.
+        """
+        # Table و Panel مستوردان من المستوى الأعلى
+
+        console.print("\n[bold cyan]🔑 Testing all API keys before starting translation...[/bold cyan]")
+
+        test_prompt = "أجب بكلمة 'جاهز' فقط."
+        results: Dict[str, bool] = {}
+
+        async def _test_single_key(key: str) -> Tuple[str, bool, str]:
+            """اختبار مفتاح واحد وإرجاع (key, valid, status_msg)"""
+            try:
+                await self.api_manager._ensure_session()
+                test_body = {
+                    "contents": [{"parts": [{"text": test_prompt}], "role": "user"}],
+                    "generationConfig": {"maxOutputTokens": 10, "temperature": 0.1}
+                }
+                url = f"{self.api_manager.base_url}?key={key}"
+                async with self.api_manager.session.post(
+                    url,
+                    json=test_body,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        return key, True, "[green]✅ Active[/green]"
+                    elif response.status == 429:
+                        # مفتاح صالح لكن به rate limit مؤقت
+                        return key, True, "[yellow]⚡ Rate limited (valid)[/yellow]"
+                    elif response.status in (401, 403):
+                        return key, False, f"[red]❌ Invalid/Expired ({response.status})[/red]"
+                    else:
+                        return key, False, f"[yellow]⚠️  HTTP {response.status}[/yellow]"
+            except asyncio.TimeoutError:
+                return key, False, "[red]⏱️  Timeout[/red]"
+            except Exception as e:
+                return key, False, f"[red]🔴 Error: {str(e)[:40]}[/red]"
+
+        # اختبار جميع المفاتيح بالتوازي
+        tasks = [_test_single_key(key) for key in self.api_manager.api_keys]
+        test_results = await asyncio.gather(*tasks)
+
+        # جدول Rich للعرض
+        table = Table(
+            title="[bold]API Keys Status Report[/bold]",
+            show_header=True,
+            header_style="bold blue"
+        )
+        table.add_column("#",                    justify="center", width=4)
+        table.add_column("Key (masked)",         justify="left",   width=26)
+        table.add_column("Status",               justify="center", width=30)
+        table.add_column("Historical Success %", justify="center", width=22)
+
+        valid_count = 0
+        for i, (key, is_valid, status_msg) in enumerate(test_results, 1):
+            results[key] = is_valid
+            if is_valid:
+                valid_count += 1
+
+            masked_key = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else key
+
+            # الحصول على معدل النجاح التاريخي من KeyStatistics
+            hist_rate = self.api_manager.key_stats[key].get_success_rate()
+            hist_str = f"{hist_rate:.1f}%" if hist_rate >= 0 else "N/A"
+            hist_colored = f"[green]{hist_str}[/green]" if hist_rate >= 80 else (
+                f"[yellow]{hist_str}[/yellow]" if hist_rate >= 50 else f"[red]{hist_str}[/red]"
+            )
+
+            table.add_row(str(i), masked_key, status_msg, hist_colored)
+
+        console.print(table)
+
+        # ملخص نهائي
+        ready_color = "green" if valid_count > 0 else "red"
+        console.print(Panel(
+            f"[{ready_color}]Valid keys: {valid_count}/{len(self.api_manager.api_keys)}[/{ready_color}]  |  "
+            f"Ready to translate: {'[green]YES ✅[/green]' if valid_count > 0 else '[red]NO ❌[/red]'}",
+            title="API Keys Summary",
+            border_style=ready_color
+        ))
+
+        if valid_count == 0:
+            raise RuntimeError(
+                "No valid API keys available. "
+                "Please check your keys in EnhancedGeminiAPI or via --api-keys argument."
+            )
+
+        logger.info(f"API key test completed: {valid_count}/{len(self.api_manager.api_keys)} valid keys")
+        return results
+
+    # ================================================================== #
+    #  حساب نقطة الجودة الحقيقية                                         #
+    # ================================================================== #
+
+    @staticmethod
+    def _calculate_real_quality_score(
+        original_content: str,
+        translated_content: str,
+        foreign_content_detected: bool,
+        translation_time: float,
+        retry_count: int = 0
+    ) -> float:
+        """
+        حساب نقطة جودة حقيقية (0–10) بدلاً من القيمة الثابتة 8.5.
+
+        المعايير المُستخدمة:
+          1. نسبة الاكتمال  — هل الترجمة وافية بالنسبة للأصل؟         (3 نقاط)
+          2. غياب المحتوى الأجنبي                                      (2.5 نقطة)
+          3. كثافة الأحرف العربية في الناتج                            (2.5 نقطة)
+          4. وقت الترجمة   — استجابة سريعة جداً قد تعني ناتجاً ناقصاً (1 نقطة)
+          5. عقوبة إعادة المحاولة                                       (1 نقطة)
+        """
+        if not translated_content or not original_content:
+            return 0.0
+
+        score = 10.0
+
+        # ── 1. نسبة الاكتمال ──────────────────────────────────────────
+        orig_words  = max(1, len(original_content.split()))
+        trans_words = len(translated_content.split())
+        completeness = trans_words / orig_words
+
+        # النص العربي أقصر من الإنجليزي عادةً (40-85% طبيعي)
+        if completeness < 0.25:
+            score -= 3.0       # ترجمة ناقصة جداً
+        elif completeness < 0.40:
+            score -= 1.5       # ناقصة نسبياً
+        elif completeness > 2.8:
+            score -= 1.0       # مطولة بشكل مبالغ (احتمال تكرار)
+
+        # ── 2. المحتوى الأجنبي ───────────────────────────────────────
+        if foreign_content_detected:
+            score -= 2.5
+
+        # ── 3. كثافة الأحرف العربية ──────────────────────────────────
+        printable_chars = [c for c in translated_content if c.strip()]
+        if printable_chars:
+            arabic_chars  = sum(1 for c in printable_chars if '\u0600' <= c <= '\u06FF')
+            arabic_ratio  = arabic_chars / len(printable_chars)
+            if arabic_ratio < 0.45:
+                score -= 2.0   # نسبة عربية منخفضة جداً
+            elif arabic_ratio < 0.65:
+                score -= 0.8
+
+        # ── 4. سرعة الترجمة ───────────────────────────────────────────
+        if translation_time > 0:
+            words_per_sec = orig_words / translation_time
+            if words_per_sec > 600:
+                # استجابة فورية قد تعني رداً مقتضباً غير مكتمل
+                score -= 0.5
+
+        # ── 5. عقوبة إعادة المحاولة ──────────────────────────────────
+        if retry_count > 0:
+            score -= min(1.0, retry_count * 0.35)
+
+        return max(0.0, min(10.0, round(score, 2)))
+
+    # ================================================================== #
+    #  إعادة المحاولة الذكية للفصول الفاشلة                              #
+    # ================================================================== #
+
+    async def _translate_with_smart_retry(self, chapter: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        يُجرب ترجمة الفصل؛ فإن فشل يُطبّق إستراتيجيتين بالتتالي:
+
+        إستراتيجية 1 — التقسيم إلى نصفين (للفصول الطويلة > 1500 كلمة):
+          • يُقسّم المحتوى إلى نصفين، يُترجم كلاً على حدة بـ _count_stats=False
+            لمنع الإحصاء المضاعف، ثم يدمجهما ويُحدّث الإحصائيات الكلية مرة واحدة.
+
+        إستراتيجية 2 — إعادة الصياغة المحايدة (لأخطاء المحتوى الحساس):
+          • يُضيف مقدمة سياقية محايدة تُقلل فرص الرفض من نماذج Safety.
+          • يُعيد ضبط original_content و id إلى قيمهما الأصليتين قبل الحفظ.
+        """
+        # ── المحاولة الأولى العادية ────────────────────────────────────
+        result = await self.translate_chapter_comprehensively(chapter)
+        if result['status'] == 'completed':
+            return result
+
+        self.translation_stats['smart_retries'] += 1
+        content     = chapter.get('content', '')
+        word_count  = chapter.get('word_count', len(content.split()))
+
+        # ── إستراتيجية 1: التقسيم ─────────────────────────────────────
+        if word_count > 1500 and content:
+            logger.info(
+                f"[SmartRetry] '{chapter['title']}' failed (words={word_count}) "
+                f"→ splitting into halves"
+            )
+            words = content.split()
+            mid   = len(words) // 2
+
+            half1 = dict(chapter)
+            half2 = dict(chapter)
+
+            half1.update({
+                'content':              ' '.join(words[:mid]),
+                'id':                   f"{chapter['id']}_part1",
+                'title':                f"{chapter['title']} (الجزء الأول)",
+                'translation_attempts': 0,
+            })
+            half2.update({
+                'content':              ' '.join(words[mid:]),
+                'id':                   f"{chapter['id']}_part2",
+                'title':                f"{chapter['title']} (الجزء الثاني)",
+                'translation_attempts': 0,
+            })
+
+            # _count_stats=False → يمنع الإحصاء المضاعف للأجزاء الفرعية
+            r1 = await self.translate_chapter_comprehensively(half1, _count_stats=False)
+            r2 = await self.translate_chapter_comprehensively(half2, _count_stats=False)
+
+            if r1['status'] == 'completed' and r2['status'] == 'completed':
+                merged_translation = (
+                    r1.get('translated_content', '') + '\n\n' +
+                    r2.get('translated_content', '')
+                )
+                foreign_merged = (
+                    r1.get('foreign_content_detected', False) or
+                    r2.get('foreign_content_detected', False)
+                )
+                time_merged = (
+                    r1.get('translation_time', 0) + r2.get('translation_time', 0)
+                )
+                quality = self._calculate_real_quality_score(
+                    content, merged_translation,
+                    foreign_merged, time_merged, retry_count=1
+                )
+                merged = dict(chapter)
+                merged.update({
+                    'translated_content':      merged_translation,
+                    'status':                  'completed',
+                    'word_count':              word_count,
+                    'quality_score':           quality,
+                    'original_content':        content,  # ← الأصل الحقيقي دون تعديل
+                    'translation_time':        time_merged,
+                    'corrections_applied':     r1.get('corrections_applied', 0) + r2.get('corrections_applied', 0),
+                    'foreign_content_detected': foreign_merged,
+                    'genre':                   r1.get('genre', chapter.get('genre', 'prose')),
+                    'tone':                    r1.get('tone',  chapter.get('tone',  'neutral')),
+                    'retry_strategy':          'split_halves',
+                })
+                self.save_chapter_advanced(merged)
+
+                # ── حذف إدخالات الأجزاء الفرعية من DB (لا لزوم لها بعد الدمج) ──
+                try:
+                    with contextlib.closing(sqlite3.connect(self.db_path)) as _conn:
+                        _conn.execute(
+                            "DELETE FROM chapters WHERE id IN (?, ?)",
+                            (f"{chapter['id']}_part1", f"{chapter['id']}_part2")
+                        )
+                        _conn.commit()
+                except Exception:
+                    pass  # الحذف اختياري — لا يُوقف العملية عند الفشل
+
+                # ── تحديث الإحصائيات الكلية (مرة واحدة فقط للفصل الأصلي) ──
+                self.translation_stats['quality_scores'].append(quality)
+                if self.translation_stats['quality_scores']:
+                    self.translation_stats['average_quality_score'] = (
+                        sum(self.translation_stats['quality_scores']) /
+                        len(self.translation_stats['quality_scores'])
+                    )
+                self.translation_stats['completed_chapters']     += 1
+                self.translation_stats['translated_words']       += word_count
+                self.translation_stats['contextual_adaptations'] += 1
+                self.translation_stats['split_recoveries']       += 1
+                if foreign_merged:
+                    self.translation_stats['foreign_content_corrections'] += 1
+
+                logger.info(f"[SmartRetry] '{chapter['title']}' recovered via split_halves ✅")
+                return merged
+
+        # ── إستراتيجية 2: إعادة الصياغة المحايدة ─────────────────────
+        logger.info(
+            f"[SmartRetry] '{chapter['title']}' → retrying with neutral rephrasing"
+        )
+        neutral_preamble = (
+            "النص التالي مقتطف أدبي من رواية. "
+            "يُرجى ترجمته إلى العربية الفصحى بأسلوب أدبي رفيع:\n\n"
+        )
+        rephrased = dict(chapter)
+        rephrased.update({
+            'content':              neutral_preamble + content,
+            'translation_attempts': 0,
+        })
+
+        # _count_stats=True هنا لأن هذا هو الفصل الكامل (لا جزء فرعي)
+        result_r = await self.translate_chapter_comprehensively(rephrased)
+        if result_r['status'] == 'completed':
+            # ── استعادة القيم الأصلية قبل الحفظ النهائي ──────────────
+            result_r['id']               = chapter['id']
+            result_r['title']            = chapter.get('title', result_r.get('title', ''))
+            result_r['original_content'] = content          # ← بدون المقدمة المحايدة
+            result_r['retry_strategy']   = 'neutral_rephrasing'
+            self.save_chapter_advanced(result_r)
+            self.translation_stats['rephrasing_recoveries'] += 1
+            logger.info(f"[SmartRetry] '{chapter['title']}' recovered via neutral_rephrasing ✅")
+            return result_r
+
+        # ── فشل كل الاستراتيجيات ─────────────────────────────────────
+        logger.error(f"[SmartRetry] All retry strategies exhausted for '{chapter['title']}'")
+        return result
+
+    async def translate_chapter_comprehensively(
+        self,
+        chapter: Dict[str, Any],
+        _count_stats: bool = True
+    ) -> Dict[str, Any]:
+        """
+        ترجمة شاملة للفصل مع ضمانات الجودة المحسنة ونقطة جودة حقيقية.
+
+        Args:
+            chapter:       بيانات الفصل المراد ترجمته.
+            _count_stats:  إذا كان False، لا تُحدَّث الإحصائيات الكلية
+                           (يُستخدم داخلياً فقط من _translate_with_smart_retry
+                           للنصفين الفرعيين حتى لا يُحسَب الفصل الواحد مرتين).
+        """
+
         start_time = time.time()
         chapter_id = chapter['id']
-        
+
         logger.info(f"Starting comprehensive translation for chapter: {chapter['title']}")
         quality_logger.info(f"Chapter {chapter_id}: Enhanced processing started")
-        
+
         try:
             # إعداد البيانات الأولية
             content = chapter.get('content', '')
@@ -4592,45 +4983,76 @@ class MasterTranslationSystem:
             chapter['character_count'] = len(content)
             chapter['status'] = 'translating'
             chapter['translation_attempts'] = chapter.get('translation_attempts', 0) + 1
-            
+
             # اكتشاف نوع النص ونبرته
             text_analysis = self.translation_engine.detect_text_genre_and_tone(content)
             chapter['genre'] = text_analysis['genre']
-            chapter['tone'] = text_analysis['tone']
-            
+            chapter['tone']  = text_analysis['tone']
+
             self.save_chapter_advanced(chapter)
-            self.log_operation(chapter_id, "translation_start", "info", 
-                             f"Started translating chapter of {chapter['word_count']} words - Genre: {text_analysis['genre']}, Tone: {text_analysis['tone']}")
-            
+            self.log_operation(
+                chapter_id, "translation_start", "info",
+                f"Started translating chapter of {chapter['word_count']} words "
+                f"- Genre: {text_analysis['genre']}, Tone: {text_analysis['tone']}"
+            )
+
             # الترجمة الشاملة مع المراجعة
             translation_context = f"هذا الفصل بعنوان '{chapter['title']}' من رواية أدبية"
-            
-            translated_content, response_time, api_key_used = await self.translation_engine.translate_with_comprehensive_review(
-                content, translation_context
-            )
-            
+
+            # ── ملاحظة: asyncio أحادي الخيط (cooperative)، لا تتقاطع coroutines بين
+            #    نقطتَي await. عمليات قاموس terminology_database آمنة دون قفل.
+            #    _terminology_lock محجوز للحالات التي تحتاج قسماً حرجاً متعدد الخطوط
+            #    عبر await (مثل read-modify-write مع تأخير خارجي). هنا غير مطلوب.
+            translated_content, response_time, api_key_used = \
+                await self.translation_engine.translate_with_comprehensive_review(
+                    content, translation_context
+                )
+
             if translated_content:
                 translation_time = time.time() - start_time
-                
-                # فحص المحتوى الأجنبي النهائي
-                foreign_content_detected = self.translation_engine.content_processor.has_any_foreign_content(translated_content)
-                
-                # حساب عدد التصحيحات المطبقة
-                corrections_count = 2 if foreign_content_detected else 1
-                
+
+                # فحص المحتوى الأجنبي النهائي على الناتج الكامل المُعاد من translate_with_comprehensive_review
+                # (قد يختلف عن الفحص الداخلي داخل translate_with_comprehensive_review لأن
+                #  has_any_foreign_content هنا تفحص النص بالكامل دون سياق الفقرات)
+                foreign_content_detected = \
+                    self.translation_engine.content_processor.has_any_foreign_content(translated_content)
+
+                # ── حساب نقطة جودة حقيقية ─────────────────────────────
+                retry_count = max(0, chapter.get('translation_attempts', 1) - 1)
+                real_quality_score = self._calculate_real_quality_score(
+                    original_content=content,
+                    translated_content=translated_content,
+                    foreign_content_detected=foreign_content_detected,
+                    translation_time=translation_time,
+                    retry_count=retry_count
+                )
+
+                # حساب عدد التصحيحات المطبقة بدقة
+                # 0 = لا تصحيح | 1 = تصحيح محتوى أجنبي فقط | 2 = تصحيح + تعديل جودة
+                corrections_count = (2 if real_quality_score < 7.0 else 1) if foreign_content_detected else 0
+
                 # تحديث بيانات الفصل
                 chapter.update({
-                    'translated_content': translated_content,
-                    'status': 'completed',
-                    'translation_time': translation_time,
-                    'quality_score': 8.5,  # نقاط افتراضية عالية
+                    'translated_content':       translated_content,
+                    'status':                   'completed',
+                    'translation_time':         translation_time,
+                    'quality_score':            real_quality_score,
                     'foreign_content_detected': foreign_content_detected,
-                    'corrections_applied': corrections_count
+                    'corrections_applied':      corrections_count,
                 })
-                
+
                 # حفظ النتائج
                 self.save_chapter_advanced(chapter)
-                
+
+                # ── تحديث الإحصائيات والجودة (فقط للفصول الرئيسية، لا الأجزاء الداخلية) ──
+                if _count_stats:
+                    self.translation_stats['quality_scores'].append(real_quality_score)
+                    if self.translation_stats['quality_scores']:
+                        self.translation_stats['average_quality_score'] = (
+                            sum(self.translation_stats['quality_scores']) /
+                            len(self.translation_stats['quality_scores'])
+                        )
+
                 # تسجيل الحدث الاستخباراتي
                 self.log_intelligent_event(
                     event_type="translation_complete",
@@ -4645,109 +5067,131 @@ class MasterTranslationSystem:
                 # تسجيل النجاح في السجلات العادية
                 self.log_operation(
                     chapter_id, "translation_complete", "success",
-                    f"Translation completed in {translation_time:.2f}s, Genre: {text_analysis['genre']}, Corrections: {corrections_count}",
+                    f"Translation completed in {translation_time:.2f}s, "
+                    f"Genre: {text_analysis['genre']}, "
+                    f"Quality: {real_quality_score}/10, "
+                    f"Corrections: {corrections_count}",
                     translation_time,
                     api_key_used if api_key_used else ""
                 )
-                
-                # تحديث الإحصائيات
-                self.translation_stats['completed_chapters'] += 1
-                self.translation_stats['translated_words'] += chapter['word_count']
-                self.translation_stats['contextual_adaptations'] += 1
-                
-                if foreign_content_detected:
-                    self.translation_stats['foreign_content_corrections'] += 1
-                    quality_logger.warning(f"Chapter {chapter_id}: Applied corrections for foreign content")
+
+                # تحديث عدادات الإحصاء (فقط للفصول الرئيسية)
+                if _count_stats:
+                    self.translation_stats['completed_chapters'] += 1
+                    self.translation_stats['translated_words']   += chapter['word_count']
+                    self.translation_stats['contextual_adaptations'] += 1
+
+                    if foreign_content_detected:
+                        self.translation_stats['foreign_content_corrections'] += 1
+                        quality_logger.warning(
+                            f"Chapter {chapter_id}: Applied corrections for foreign content "
+                            f"(quality={real_quality_score})"
+                        )
+                    else:
+                        quality_logger.info(
+                            f"Chapter {chapter_id}: Free of foreign content "
+                            f"(quality={real_quality_score})"
+                        )
                 else:
-                    quality_logger.info(f"Chapter {chapter_id}: Free of foreign content")
-                
-                logger.info(f"Translation finished for chapter {chapter['title']} successfully - "
-                          f"Time: {translation_time:.2f}s, Genre: {text_analysis['genre']}")
-                
+                    # وضع داخلي (جزء فرعي) — نسجّل فقط دون تحديث عدادات الكلية
+                    quality_logger.info(
+                        f"[SubChunk] {chapter_id}: quality={real_quality_score}, "
+                        f"foreign={foreign_content_detected}"
+                    )
+
+                logger.info(
+                    f"Translation finished for chapter '{chapter['title']}' — "
+                    f"Time: {translation_time:.2f}s, "
+                    f"Genre: {text_analysis['genre']}, "
+                    f"Quality: {real_quality_score}/10"
+                )
                 return chapter
-                
+
             else:
                 # فشل في الترجمة
                 chapter['status'] = 'failed'
                 self.save_chapter_advanced(chapter)
-                
                 self.log_operation(chapter_id, "translation_failed", "error",
-                                 "Failed to get translation from API")
-                
+                                   "Failed to get translation from API")
                 logger.error(f"Translation failed for chapter: {chapter['title']}")
                 return chapter
-                
+
         except Exception as e:
-            # خطأ في العملية
             chapter['status'] = 'error'
             error_message = str(e)
-            
             self.save_chapter_advanced(chapter)
             self.log_operation(chapter_id, "translation_error", "error", error_message)
-            
             logger.error(f"Error translating chapter {chapter['title']}: {error_message}")
             logger.error(traceback.format_exc())
-            
             return chapter
     
     async def process_complete_book(self, pdf_path: str, output_dir: str,
-                                  book_title: str = None, author: str = None) -> str:
-        """معالجة كاملة للكتاب من PDF إلى رواية جاهزة للقراءة مع فهرس منفصل"""
-        
+                                    book_title: str = None, author: str = None) -> str:
+        """
+        معالجة كاملة للكتاب من PDF إلى رواية جاهزة للقراءة مع فهرس منفصل.
+
+        التحسينات الجوهرية في هذه النسخة (مع الحفاظ على التسلسل الأصلي):
+          ✅ فحص سلامة DB عند بدء التشغيل
+          ✅ نقطة جودة حقيقية محسوبة لكل فصل
+          ✅ إعادة محاولة ذكية للفصول الفاشلة (تقسيم / إعادة صياغة)
+          ✅ تقرير HTML يُولَّد تلقائياً في مجلد الإخراج
+          ✅ ترجمة تسلسلية مضمونة: فصل ثم فصل بالترتيب
+        """
         # إنشاء مجلد الإخراج
         output_path_obj = Path(output_dir)
         output_path_obj.mkdir(parents=True, exist_ok=True)
-        
+
         # تحديد اسم الملف المخرج
-        pdf_name = Path(pdf_path).stem
+        pdf_name    = Path(pdf_path).stem
         output_file = output_path_obj / f"{pdf_name}_رواية_مترجمة.docx"
-        
+
         logger.info("=" * 100)
         logger.info("Starting enhanced comprehensive processing of the novel with a separate TOC")
         logger.info(f"Source file: {pdf_path}")
         logger.info(f"Target file: {output_file}")
         logger.info("=" * 100)
-        
+
         self.translation_stats['translation_start_time'] = time.time()
-        
+
         try:
-            # المرحلة 0: عرض التحليلات الاستخباراتية السابقة (إن وجدت)
+            # المرحلة 0: عرض التحليلات الاستخباراتية السابقة
             self.analyze_and_display_intelligence()
 
             # المرحلة 1: استخراج وتحليل المستند
             logger.info("📖 Phase 1: Extracting and analyzing the document...")
             document_structure = self.document_processor.extract_pdf_with_precision(pdf_path)
-            
-            # تحميل الفصول المكتملة مسبقاً من قاعدة البيانات
+
+            # تحميل الفصول المكتملة مسبقاً
             previously_completed = self._load_completed_chapters_from_db()
 
             chapters = document_structure['chapters']
-            self.translation_stats['total_chapters'] = len(chapters)
-            self.translation_stats['total_words'] = sum(ch['word_count'] for ch in chapters)
-            self.translation_stats['total_characters'] = sum(len(ch.get('content', '')) for ch in chapters)
-            
+            self.translation_stats['total_chapters']    = len(chapters)
+            self.translation_stats['total_words']       = sum(ch['word_count'] for ch in chapters)
+            self.translation_stats['total_characters']  = sum(len(ch.get('content', '')) for ch in chapters)
+
             if not book_title:
                 book_title = document_structure.get('title', 'Translated Novel') or 'Translated Novel'
             if not author:
                 author = document_structure.get('author', 'Unknown Author') or 'Unknown Author'
-            
+
             logger.info(f"📊 Extracted {len(chapters)} chapters")
             logger.info(f"📊 Total words: {self.translation_stats['total_words']:,}")
             logger.info(f"📊 Total characters: {self.translation_stats['total_characters']:,}")
             logger.info(f"📚 Book Title: {book_title}")
             logger.info(f"✍️ Author: {author}")
 
-            # ── بناء القائمة البيضاء الديناميكية من النص الكامل للكتاب ──
-            # يُحسّن دقة كشف المحتوى الأجنبي بتمييز أسماء الشخصيات والأماكن
+            # بناء القائمة البيضاء الديناميكية
             logger.info("🧠 Building dynamic whitelist from full book text (character names, places)...")
             full_book_text = " ".join(ch.get('content', '') for ch in chapters)
             self.translation_engine.content_processor.build_book_whitelist(full_book_text)
 
-            # المرحلة 2: ترجمة شاملة مع مراجعة متعددة المراحل
-            logger.info("🔄 Phase 2: Starting comprehensive translation with strict no-foreign-content guarantee...")
-            
+            # ================================================================ #
+            # المرحلة 2: الترجمة التسلسلية — فصل ثم فصل بالترتيب             #
+            # ================================================================ #
+            logger.info("🔄 Phase 2: Starting sequential translation (chapter by chapter)...")
+
             all_processed_chapters = []
-            
+
             with Progress(
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(complete_style="green", finished_style="bold green"),
@@ -4755,91 +5199,136 @@ class MasterTranslationSystem:
                 TimeRemainingColumn(),
                 console=console
             ) as progress:
-                translation_task = progress.add_task("[cyan]Translating chapters...", total=len(chapters))
-                
+                translation_task = progress.add_task(
+                    "[cyan]Translating chapters...", total=len(chapters)
+                )
+
                 for i, chapter in enumerate(chapters):
                     logger.info("-" * 50)
-                    
-                    # التحقق من وجود ترجمة سابقة للفصل
+
+                    # ── فصل مُترجم مسبقاً (skip) ────────────────────────
                     if chapter['id'] in previously_completed:
-                        logger.info(f"⏭️ Skipping chapter {i+1}/{len(chapters)}: '{chapter['title']}' (previously translated).")
+                        cached = previously_completed[chapter['id']]
+                        all_processed_chapters.append(cached)
 
-                        completed_chapter_info = previously_completed[chapter['id']]
-                        all_processed_chapters.append(completed_chapter_info)
-
-                        # تحديث الإحصائيات
-                        self.translation_stats['skipped_chapters'] += 1
+                        self.translation_stats['skipped_chapters']   += 1
                         self.translation_stats['completed_chapters'] += 1
-                        self.translation_stats['translated_words'] += completed_chapter_info.get('word_count', 0)
+                        self.translation_stats['translated_words']   += cached.get('word_count', 0)
 
-                        progress.update(translation_task, advance=1, description=f"[green]Skipped (Cached): {chapter['title']}")
+                        # إضافة نقطة الجودة المحفوظة للمتوسط
+                        cached_quality = cached.get('quality_score', 0.0)
+                        if cached_quality > 0:
+                            self.translation_stats['quality_scores'].append(cached_quality)
+                            if self.translation_stats['quality_scores']:
+                                self.translation_stats['average_quality_score'] = (
+                                    sum(self.translation_stats['quality_scores']) /
+                                    len(self.translation_stats['quality_scores'])
+                                )
+
+                        logger.info(
+                            f"⏭️ Skipping chapter {i+1}/{len(chapters)}: "
+                            f"'{chapter['title']}' (previously translated, "
+                            f"quality={cached_quality:.2f})"
+                        )
+                        progress.update(
+                            translation_task, advance=1,
+                            description=f"[green]Skipped (Cached): {chapter['title']}"
+                        )
                         continue
 
+                    # ── ترجمة فعلية مع إعادة المحاولة الذكية ────────────
                     logger.info(f"📝 Translating chapter {i+1}/{len(chapters)}: {chapter['title']}")
-                    progress.update(translation_task, description=f"[yellow]Translating: {chapter['title']}")
-                    
-                    result = await self.translate_chapter_comprehensively(chapter)
+                    progress.update(
+                        translation_task,
+                        description=f"[yellow]Translating: {chapter['title']}"
+                    )
+
+                    result = await self._translate_with_smart_retry(chapter)
                     all_processed_chapters.append(result)
-                    
-                    progress.update(translation_task, advance=1, description=f"[green]Completed: {chapter['title']}")
 
-                    elapsed_time = time.time() - self.translation_stats['translation_start_time']
+                    progress.update(
+                        translation_task, advance=1,
+                        description=f"[green]Completed: {chapter['title']}"
+                    )
+
+                    # تسجيل إحصائيات التقدم كل 5 فصول
+                    elapsed_time  = time.time() - self.translation_stats['translation_start_time']
                     chapters_done = i + 1
-                    if chapters_done > 0:
-                        avg_time_per_chapter = elapsed_time / chapters_done
-                        remaining_chapters = len(chapters) - chapters_done
-                        estimated_remaining = avg_time_per_chapter * remaining_chapters
+                    successful_so_far = sum(
+                        1 for ch in all_processed_chapters if ch.get('status') == 'completed'
+                    )
+                    if successful_so_far > 0 and chapters_done % 5 == 0:
+                        avg_time = elapsed_time / chapters_done
+                        remaining = avg_time * (len(chapters) - chapters_done)
+                        logger.info(
+                            f"📊 Progress: {successful_so_far}/{len(chapters)} completed | "
+                            f"Avg quality: {self.translation_stats['average_quality_score']:.2f}/10 | "
+                            f"Est. remaining: {remaining/60:.1f} min"
+                        )
 
-                        # Only logging summary stats instead of visual progress bar numbers
-                        successful = sum(1 for ch in all_processed_chapters if ch['status'] == 'completed')
-                        if successful > 0 and chapters_done % 5 == 0:
-                            logger.info(f"✅ Statistics: Completed chapters {successful}")
-            
-            # المرحلة 3: التحقق النهائي من الجودة
+            # ================================================================ #
+            # المرحلة 3: التحقق النهائي من الجودة                              #
+            # ================================================================ #
             logger.info("🔍 Phase 3: Final Quality Check...")
-            
-            successful_chapters = [ch for ch in all_processed_chapters if ch['status'] == 'completed']
-            failed_chapters = [ch for ch in all_processed_chapters if ch['status'] in ['failed', 'error']]
-            
+
+            successful_chapters = [
+                ch for ch in all_processed_chapters if ch.get('status') == 'completed'
+            ]
+            failed_chapters = [
+                ch for ch in all_processed_chapters if ch.get('status') in ['failed', 'error']
+            ]
+
             if failed_chapters:
                 logger.warning(f"⚠️  {len(failed_chapters)} chapters failed to translate:")
                 for ch in failed_chapters:
                     logger.warning(f"   - {ch['title']}")
-            
-            chapters_with_foreign = [ch for ch in successful_chapters if ch.get('foreign_content_detected', False)]
+
+            chapters_with_foreign = [
+                ch for ch in successful_chapters if ch.get('foreign_content_detected', False)
+            ]
             if chapters_with_foreign:
-                quality_logger.warning(f"Foreign content corrections applied in {len(chapters_with_foreign)} chapters")
+                quality_logger.warning(
+                    f"Foreign content corrections applied in {len(chapters_with_foreign)} chapters"
+                )
             else:
                 quality_logger.info("All chapters are completely free of foreign content")
-            
-            # المرحلة 4: إنشاء فهرس منظم بدون تكرار
+
+            # ================================================================ #
+            # المرحلة 4: إنشاء فهرس منظم بدون تكرار                           #
+            # ================================================================ #
             logger.info("📋 Phase 4: Creating organized table of contents without duplicates...")
-            
+
             table_of_contents = await self.document_generator.create_table_of_contents(
                 successful_chapters, self.api_manager
             )
-            
-            logger.info(f"Professional TOC created with {len(table_of_contents)} unique titles (no page numbers)")
-            
-            # المرحلة 5: إنشاء مستند الرواية النهائي مع الفهرس المنفصل
+            logger.info(
+                f"Professional TOC created with {len(table_of_contents)} unique titles (no page numbers)"
+            )
+
+            # ================================================================ #
+            # المرحلة 5: إنشاء مستند الرواية النهائي                           #
+            # ================================================================ #
             logger.info("📝 Phase 5: Generating final novel document with professional formatting...")
             logger.info("🎯 Font sizes: Body 14pt, Titles 15pt")
             logger.info("📄 TOC: Professional with written Arabic numerals")
             logger.info("📐 Layout: Optimized spacing mirroring printed novels")
-            
+
             final_document_path = self.document_generator.create_novel_document(
                 successful_chapters, str(output_file), book_title, author, table_of_contents
             )
-            
-            # المرحلة 6: تجميع الإحصائيات النهائية
-            total_time = time.time() - self.translation_stats['translation_start_time']
+
+            # ================================================================ #
+            # المرحلة 6: تجميع الإحصائيات النهائية وتوليد التقرير HTML         #
+            # ================================================================ #
+            total_time       = time.time() - self.translation_stats['translation_start_time']
             total_successful = len(successful_chapters)
-            total_failed = len(failed_chapters)
-            
+            total_failed     = len(failed_chapters)
+
             translated_words = sum(ch.get('word_count', 0) for ch in successful_chapters)
             words_per_minute = translated_words / (total_time / 60) if total_time > 0 else 0
-            
-            # تقرير نهائي شامل
+            avg_quality      = self.translation_stats['average_quality_score']
+
+            # ── تقرير نهائي شامل ────────────────────────────────────────────
             logger.info("=" * 100)
             logger.info("🎉 Novel processed successfully with a separate TOC!")
             logger.info("=" * 100)
@@ -4852,8 +5341,8 @@ class MasterTranslationSystem:
             logger.info(f"📊 Total Words Translated: {translated_words:,}")
             logger.info(f"⏱️  Total Time: {total_time/60:.1f} minutes")
             logger.info(f"🚀 Translation Rate: {words_per_minute:.0f} words/minute")
-            
-            # إحصائيات التحسينات
+            logger.info(f"⭐ Average Quality Score: {avg_quality:.2f}/10")
+
             logger.info("=" * 50)
             logger.info("🔧 Applied Enhancements Statistics:")
             logger.info(f"   🌍 Foreign Content Corrections: {self.translation_stats['foreign_content_corrections']}")
@@ -4863,152 +5352,455 @@ class MasterTranslationSystem:
             logger.info(f"   📋 Professional TOC: {len(table_of_contents)} chapters with Arabic numerals")
             logger.info(f"   🎯 Uniform Font Sizes: Body 14pt, Titles 15pt")
             logger.info(f"   📐 Enhanced Formatting: Optimized space, calculated spacing")
+            logger.info(f"   🔁 Smart Retries Triggered: {self.translation_stats['smart_retries']}")
+            logger.info(f"      ↳ Split recoveries:     {self.translation_stats['split_recoveries']}")
+            logger.info(f"      ↳ Rephrasing recoveries:{self.translation_stats['rephrasing_recoveries']}")
 
             logger.info(f"📁 Final professionally formatted novel: {final_document_path}")
             logger.info("=" * 100)
-            
+
             quality_logger.info("Final Quality Report:")
-            quality_logger.info(f"Total corrections applied: {sum(ch.get('corrections_applied', 0) for ch in successful_chapters)}")
-            
+            quality_logger.info(
+                f"Total corrections applied: "
+                f"{sum(ch.get('corrections_applied', 0) for ch in successful_chapters)}"
+            )
+
             # تصنيف الفصول حسب النوع
-            genre_counts = {}
-            tone_counts = {}
+            genre_counts: Dict[str, int] = {}
+            tone_counts:  Dict[str, int] = {}
             for ch in successful_chapters:
                 genre = ch.get('genre', 'unknown')
-                tone = ch.get('tone', 'unknown')
+                tone  = ch.get('tone',  'unknown')
                 genre_counts[genre] = genre_counts.get(genre, 0) + 1
-                tone_counts[tone] = tone_counts.get(tone, 0) + 1
-            
+                tone_counts[tone]   = tone_counts.get(tone,  0) + 1
+
             quality_logger.info("Literary Genre Distribution:")
             for genre, count in genre_counts.items():
                 quality_logger.info(f"  {genre}: {count} chapters")
-            
+
             quality_logger.info("Emotional Tone Distribution:")
             for tone, count in tone_counts.items():
                 quality_logger.info(f"  {tone}: {count} chapters")
-            
+
+            # ── توليد تقرير HTML تلقائي ─────────────────────────────────────
+            html_path = self.generate_html_report(
+                book_title=book_title,
+                author=author,
+                successful_chapters=successful_chapters,
+                failed_chapters=failed_chapters,
+                total_time=total_time,
+                words_per_minute=words_per_minute,
+                avg_quality=avg_quality,
+                genre_counts=genre_counts,
+                tone_counts=tone_counts,
+                output_dir=output_dir,
+            )
+            logger.info(f"📊 HTML Report generated: {html_path}")
+
             return final_document_path
-            
+
         except Exception as e:
             logger.error(f"Fatal error during novel processing: {str(e)}")
             logger.error(traceback.format_exc())
             raise
 
+    # ================================================================== #
+    #  توليد تقرير HTML                                                   #
+    # ================================================================== #
+
+    def generate_html_report(
+        self,
+        book_title: str,
+        author: str,
+        successful_chapters: List[Dict],
+        failed_chapters: List[Dict],
+        total_time: float,
+        words_per_minute: float,
+        avg_quality: float,
+        genre_counts: Dict[str, int],
+        tone_counts: Dict[str, int],
+        output_dir: str,
+    ) -> str:
+        """
+        يُولِّد تقرير HTML احترافي بعد اكتمال الترجمة.
+        يشمل: إحصائيات عامة، توزيع الجودة، الأنواع الأدبية والنبرات،
+        تفاصيل كل فصل، وإحصائيات الإعادة الذكية.
+        يُحفظ تلقائياً في مجلد الإخراج.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_title = re.sub(r'[^\w\s-]', '', book_title)[:40].strip().replace(' ', '_')
+        report_path = Path(output_dir) / f"translation_report_{safe_title}_{timestamp}.html"
+
+        # ── بناء صفوف جدول الفصول ──────────────────────────────────────
+        chapter_rows = []
+        for i, ch in enumerate(successful_chapters, 1):
+            q      = ch.get('quality_score', 0)
+            q_color = "#27ae60" if q >= 8 else ("#f39c12" if q >= 6 else "#e74c3c")
+            retry  = f'<span style="color:#e67e22">({ch.get("retry_strategy","—")})</span>' \
+                     if ch.get('retry_strategy') else '—'
+            chapter_rows.append(f"""
+                <tr>
+                    <td style="text-align:center">{i}</td>
+                    <td dir="rtl">{ch.get('title','—')}</td>
+                    <td style="text-align:center">{ch.get('word_count',0):,}</td>
+                    <td style="text-align:center">{ch.get('genre','—')}</td>
+                    <td style="text-align:center">{ch.get('tone','—')}</td>
+                    <td style="text-align:center;color:{q_color};font-weight:bold">{q:.2f}</td>
+                    <td style="text-align:center">{ch.get('translation_time',0):.1f}s</td>
+                    <td style="text-align:center">{'⚠️' if ch.get('foreign_content_detected') else '✅'}</td>
+                    <td style="text-align:center">{retry}</td>
+                </tr>""")
+
+        for ch in failed_chapters:
+            chapter_rows.append(f"""
+                <tr style="background:#fdecea">
+                    <td style="text-align:center">—</td>
+                    <td dir="rtl">{ch.get('title','—')}</td>
+                    <td colspan="7" style="text-align:center;color:#e74c3c">
+                        ❌ Failed — {ch.get('status','error')}
+                    </td>
+                </tr>""")
+
+        # ── بناء توزيع الأنواع ──────────────────────────────────────────
+        def _dist_bars(counts: Dict[str, int]) -> str:
+            total = max(1, sum(counts.values()))
+            rows  = []
+            for label, n in sorted(counts.items(), key=lambda x: -x[1]):
+                pct = n / total * 100
+                rows.append(
+                    f'<div style="margin:4px 0"><span style="display:inline-block;width:130px">'
+                    f'{label}</span>'
+                    f'<span style="display:inline-block;background:#3498db;height:14px;'
+                    f'width:{pct:.0f}%;max-width:200px;border-radius:3px"></span>'
+                    f' <small>{n} ({pct:.0f}%)</small></div>'
+                )
+            return '\n'.join(rows)
+
+        quality_dist = ""
+        if successful_chapters:
+            buckets = {"Excellent (9-10)": 0, "Good (7-8.9)": 0,
+                       "Fair (5-6.9)": 0, "Poor (<5)": 0}
+            for ch in successful_chapters:
+                q = ch.get('quality_score', 0)
+                if q >= 9:    buckets["Excellent (9-10)"] += 1
+                elif q >= 7:  buckets["Good (7-8.9)"]     += 1
+                elif q >= 5:  buckets["Fair (5-6.9)"]      += 1
+                else:         buckets["Poor (<5)"]          += 1
+            quality_dist = _dist_bars(buckets)
+
+        smart_retry_stats = f"""
+            <li>🔁 Smart Retries Triggered: <b>{self.translation_stats['smart_retries']}</b></li>
+            <li>&nbsp;&nbsp;↳ Split Recoveries: <b>{self.translation_stats['split_recoveries']}</b></li>
+            <li>&nbsp;&nbsp;↳ Rephrasing Recoveries: <b>{self.translation_stats['rephrasing_recoveries']}</b></li>
+        """
+
+        translated_words = sum(ch.get('word_count', 0) for ch in successful_chapters)
+        html = f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>Translation Report — {book_title}</title>
+  <style>
+    body   {{ font-family: 'Segoe UI', Arial, sans-serif; background:#f4f6f8;
+              color:#333; margin:0; padding:20px }}
+    .card  {{ background:#fff; border-radius:10px; padding:20px; margin-bottom:20px;
+              box-shadow:0 2px 8px rgba(0,0,0,.08) }}
+    h1     {{ color:#2c3e50; border-bottom:3px solid #3498db; padding-bottom:10px }}
+    h2     {{ color:#2980b9; margin-top:0 }}
+    table  {{ width:100%; border-collapse:collapse; font-size:.9em }}
+    th     {{ background:#2c3e50; color:#fff; padding:8px 10px }}
+    td     {{ padding:7px 10px; border-bottom:1px solid #ecf0f1 }}
+    tr:hover {{ background:#f8f9fa }}
+    .stat  {{ display:inline-block; background:#3498db; color:#fff; border-radius:8px;
+              padding:12px 20px; margin:6px; text-align:center; min-width:120px }}
+    .stat b {{ display:block; font-size:1.6em }}
+    .good  {{ background:#27ae60 }}
+    .warn  {{ background:#f39c12 }}
+    .bad   {{ background:#e74c3c }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>📊 Translation Report</h1>
+    <p>
+      <b>📖 Title:</b> {book_title} &nbsp;|&nbsp;
+      <b>✍️ Author:</b> {author} &nbsp;|&nbsp;
+      <b>📅 Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>📈 Summary Statistics</h2>
+    <div>
+      <div class="stat"><b>{len(successful_chapters)}</b>Chapters OK</div>
+      <div class="stat {'bad' if failed_chapters else 'good'}"><b>{len(failed_chapters)}</b>Failed</div>
+      <div class="stat"><b>{translated_words:,}</b>Words</div>
+      <div class="stat"><b>{total_time/60:.1f} min</b>Total Time</div>
+      <div class="stat"><b>{words_per_minute:.0f}</b>Words/min</div>
+      <div class="stat {'good' if avg_quality>=8 else ('warn' if avg_quality>=6 else 'bad')}">
+        <b>{avg_quality:.2f}/10</b>Avg Quality
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="display:flex;gap:20px">
+    <div style="flex:1">
+      <h2>🎭 Genre Distribution</h2>
+      {_dist_bars(genre_counts) if genre_counts else "<p>No data</p>"}
+    </div>
+    <div style="flex:1">
+      <h2>💫 Tone Distribution</h2>
+      {_dist_bars(tone_counts) if tone_counts else "<p>No data</p>"}
+    </div>
+    <div style="flex:1">
+      <h2>⭐ Quality Distribution</h2>
+      {quality_dist if quality_dist else "<p>No data</p>"}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>🔧 Smart Retry & Parallel Stats</h2>
+    <ul>{smart_retry_stats}</ul>
+    <ul>
+      <li>🌍 Foreign Content Corrections: <b>{self.translation_stats['foreign_content_corrections']}</b></li>
+      <li>📖 Contextual Adaptations: <b>{self.translation_stats['contextual_adaptations']}</b></li>
+      <li>🔑 API Keys Used: <b>{len(self.api_manager.api_keys)}</b></li>
+      <li>📚 Terminology Entries Saved: <b>{len(self.translation_engine.terminology_database)}</b></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>📋 Chapter Details</h2>
+    <table>
+      <tr>
+        <th>#</th><th>Title</th><th>Words</th><th>Genre</th><th>Tone</th>
+        <th>Quality</th><th>Time</th><th>Foreign</th><th>Retry</th>
+      </tr>
+      {''.join(chapter_rows)}
+    </table>
+  </div>
+</body>
+</html>"""
+
+        try:
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html)
+            logger.info(f"HTML report saved: {report_path}")
+        except Exception as e:
+            logger.warning(f"Could not save HTML report: {e}")
+
+        return str(report_path)
+
 
 def validate_input_paths(input_path: str, output_dir: str) -> Tuple[bool, str]:
     """التحقق من صحة مسارات الإدخال والإخراج"""
-    
-    # التحقق من وجود ملف الإدخال
+
     if not os.path.exists(input_path):
         return False, f"Input file not found: {input_path}"
-    
-    # التحقق من أن الملف هو PDF
+
     if not input_path.lower().endswith('.pdf'):
         return False, "File must be a PDF"
-    
-    # التحقق من إمكانية إنشاء مجلد الإخراج
+
     try:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
     except Exception as e:
         return False, f"Cannot create output directory: {str(e)}"
-    
+
     return True, "Paths are valid"
 
 
+def _build_cli_parser() -> argparse.ArgumentParser:
+    """
+    بناء محلل سطر الأوامر الاحترافي.
+
+    الاستخدام الأساسي:
+        python PF_5_.py --input /path/to/book.pdf --output /path/to/output/
+
+    أمثلة:
+        python PF_5_.py -i book.pdf -o ./output --title "اسم الرواية" --author "المؤلف"
+        python PF_5_.py -i book.pdf -o ./output --skip-api-test
+        python PF_5_.py -i book.pdf -o ./output --api-keys KEY1 KEY2 KEY3
+    """
+    parser = argparse.ArgumentParser(
+        prog="translation_system",
+        description=(
+            "🚀 نظام الترجمة الشامل عالي الجودة — يُترجم روايات PDF إلى العربية\n"
+            "Complete High-Quality Translation System using Gemini AI"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python PF_5_.py -i /path/to/book.pdf -o /path/to/output
+  python PF_5_.py -i book.pdf -o ./out --title "رواية الحرب والسلام" --author "تولستوي"
+  python PF_5_.py -i book.pdf -o ./out --skip-api-test --api-keys KEY1 KEY2
+        """
+    )
+
+    # ── مجموعة الإدخال/الإخراج (إلزامية) ──────────────────────────────
+    io_group = parser.add_argument_group("📁 Input / Output  (required)")
+    io_group.add_argument(
+        "-i", "--input",
+        metavar="PDF_PATH",
+        required=True,
+        help="مسار ملف PDF المراد ترجمته (Path to the source PDF file)"
+    )
+    io_group.add_argument(
+        "-o", "--output",
+        metavar="OUTPUT_DIR",
+        required=True,
+        help="مجلد حفظ الملفات الناتجة (Output directory for translated files)"
+    )
+
+    # ── معلومات الكتاب (اختيارية) ───────────────────────────────────────
+    book_group = parser.add_argument_group("📚 Book Metadata  (optional)")
+    book_group.add_argument(
+        "-t", "--title",
+        metavar="TITLE",
+        default=None,
+        help="عنوان الرواية (Novel title; auto-detected from PDF if omitted)"
+    )
+    book_group.add_argument(
+        "-a", "--author",
+        metavar="AUTHOR",
+        default=None,
+        help="اسم المؤلف (Author name; auto-detected if omitted)"
+    )
+
+    # ── إعدادات API ──────────────────────────────────────────────────────
+    api_group = parser.add_argument_group("🔑 API Configuration  (optional)")
+    api_group.add_argument(
+        "--api-keys",
+        metavar="KEY",
+        nargs="+",
+        default=[],
+        help="مفاتيح Gemini API إضافية تُضاف إلى المفاتيح المدمجة "
+             "(Extra Gemini API keys appended to built-in keys)"
+    )
+    api_group.add_argument(
+        "--skip-api-test",
+        action="store_true",
+        default=False,
+        help="تخطي اختبار صحة المفاتيح قبل بدء الترجمة (Skip API key validation)"
+    )
+
+    return parser
+
+
 async def main():
-    """الدالة الرئيسية للنظام المحسن مع الفهرس المنفصل"""
-    
-    print("🚀 Enhanced Comprehensive Translation System - For Novels & Literature with Separate TOC")
-    print("=" * 90)
-    print("✨ Enhanced Features:")
-    print("   🔑 Multiple API keys for continuity")
-    print("   🌍 Complete removal of foreign content (words and numbers)")
-    print("   📖 Contextual translation based on genre and emotional tone")
-    print("   🎭 Adaptation to literary genres (poetry, drama, narrative, prose)")
-    print("   💫 Adaptation to emotional tones (melancholic, joyful, dramatic, neutral)")
-    print("   📚 Smart terminology saving and management")
-    print("   📋 Creation of professional book-like TOC - Chapter names only!")
-    print("   📄 Final output for novels - Professional TOC + Structured text")
-    print("   🎯 Specific font sizes: Body 14pt, Titles 15pt")
-    print("   🔍 Multi-stage review to ensure highest quality")
-    print("=" * 90)
-    
-    # إنشاء النظام المحسن
-    system = MasterTranslationSystem([])  # سيتم استخدام المفاتيح المدمجة
-    
-    # استخدام المسارات المحددة
-    input_path = "/root/Downloads/teanasost/input/1p.pdf"
-    output_dir = "/root/Downloads/teanasost/output"
-    
-    print(f"\n📁 Path Information:")
-    print(f"Input Path: {input_path}")
-    print(f"Output Directory: {output_dir}")
-    
-    # التحقق من صحة المسارات
-    is_valid, validation_message = validate_input_paths(input_path, output_dir)
-    
-    if not is_valid:
-        print(f"\n❌ Path Error: {validation_message}")
-        return
-    
-    print(f"✅ {validation_message}")
-    
-    # معلومات إضافية اختيارية
-    print(f"\n📚 Novel Information (Optional):")
-    book_title = input("Novel Title (Enter to skip): ").strip()
-    author = input("Author Name (Enter to skip): ").strip()
-    
-    if not book_title:
-        book_title = None
-    if not author:
-        author = None
-    
-    try:
-        print("\n🔄 Starting enhanced comprehensive translation process with separate TOC...")
-        print("🌟 Enhanced System Guarantees:")
-        print("   • Translation of every single word, letter, and number in text")
-        print("   • Contextual adaptation based on emotional text type")
-        print("   • Complete removal of any foreign content")
-        print("   • Professional book-like TOC creation - Chapter names only")
-        print("   • Specific font sizes: Body 14pt, Titles 15pt")
-        print("   • Clean, ready-to-read novel output")
-        print("-" * 90)
-        
-        # تشغيل النظام الكامل المحسن
-        final_document = await system.process_complete_book(
-            input_path, output_dir, book_title, author
+    """
+    الدالة الرئيسية للنظام المحسن — واجهة سطر أوامر احترافية.
+
+    تدعم التشغيل التفاعلي القديم (بدون معاملات) للتوافق العكسي،
+    وتستخدم argparse عند تمرير معاملات سطر الأوامر.
+    """
+    parser = _build_cli_parser()
+
+    # ── اكتشاف وضع التشغيل ──────────────────────────────────────────────
+    # إذا لم يُمرَّر أي معامل (تشغيل تفاعلي قديم) نستخدم stdin
+    interactive_mode = len(sys.argv) == 1
+
+    if interactive_mode:
+        # ── الوضع التفاعلي (للتوافق مع السلوك القديم) ──────────────────
+        console.print(
+            "\n[bold cyan]🚀 Enhanced Comprehensive Translation System[/bold cyan]\n"
+            "[dim]Tip: Run with --help to see all CLI options for non-interactive use.[/dim]\n"
         )
-        
-        print(f"\n🎉 Translated novel with professional TOC created successfully!")
-        print(f"📄 Final Novel: {final_document}")
-        print(f"📋 Novel contains a professional TOC like real printed books!")
-        print(f"🚫 TOC: Chapter names only without page numbers!")
-        print(f"🎯 Font sizes: Body text 14pt, Titles 15pt only!")
-        print(f"📐 Formatting: Optimal space utilization like printed novels!")
-        
-        # عرض ملخص الإنجازات
-        if system.translation_stats['foreign_content_corrections'] > 0:
-            print(f"\n🔧 Applied {system.translation_stats['foreign_content_corrections']} foreign content corrections")
-        
-        if system.translation_stats['contextual_adaptations'] > 0:
-            print(f"📖 Applied {system.translation_stats['contextual_adaptations']} contextual adaptations")
-        
-        print(f"📚 Saved {len(system.translation_engine.terminology_database)} terms to database")
-        
+        input_path = input("📂 PDF file path: ").strip()
+        output_dir = input("📁 Output directory: ").strip()
+        book_title_in = input("📖 Novel title (Enter to skip): ").strip() or None
+        author_in     = input("✍️  Author name (Enter to skip): ").strip()  or None
+        skip_api_test = False
+        extra_keys    = []
+    else:
+        # ── وضع سطر الأوامر ──────────────────────────────────────────────
+        args = parser.parse_args()
+        input_path    = args.input
+        output_dir    = args.output
+        book_title_in = args.title
+        author_in     = args.author
+        skip_api_test = args.skip_api_test
+        extra_keys    = args.api_keys
+
+    # ── عرض لافتة المعلومات ───────────────────────────────────────────────
+    console.rule("[bold blue]Enhanced Comprehensive Translation System[/bold blue]")
+    console.print("[bold green]✨ Features:[/bold green]")
+    console.print("  🔑 Multiple API keys  |  🔁 Smart retry      |  📊 Real quality score")
+    console.print("  📋 Professional TOC   |  📊 Auto HTML report      |  🛡️  DB integrity check")
+    console.rule()
+
+    # ── التحقق من صحة المسارات ───────────────────────────────────────────
+    is_valid, validation_message = validate_input_paths(input_path, output_dir)
+    if not is_valid:
+        console.print(f"\n[bold red]❌ Path Error:[/bold red] {validation_message}")
+        sys.exit(1)
+    console.print(f"[green]✅ {validation_message}[/green]")
+    console.print(f"   [dim]Input :[/dim] {input_path}")
+    console.print(f"   [dim]Output:[/dim] {output_dir}")
+
+    # ── إنشاء النظام ──────────────────────────────────────────────────────
+    system = MasterTranslationSystem(extra_keys)
+
+    # ── اختبار مفاتيح API (ما لم يُطلب التخطي) ───────────────────────────
+    if not skip_api_test:
+        try:
+            await system.test_all_api_keys()
+        except RuntimeError as e:
+            console.print(f"\n[bold red]❌ API Key Error:[/bold red] {e}")
+            sys.exit(1)
+    else:
+        console.print("[yellow]⚠️  API key test skipped (--skip-api-test)[/yellow]")
+
+    # ── تشغيل النظام الكامل ───────────────────────────────────────────────
+    try:
+        console.print("\n[bold]🔄 Starting enhanced comprehensive translation process...[/bold]")
+
+        final_document = await system.process_complete_book(
+            input_path, output_dir, book_title_in, author_in
+        )
+
+        console.rule("[bold green]✅ Translation Complete[/bold green]")
+        console.print(f"[green]📄 Final Novel:[/green] {final_document}")
+        console.print(f"[green]📊 HTML Report:[/green] saved in {output_dir}")
+
+        # ملخص التحسينات
+        stats = system.translation_stats
+        if stats['foreign_content_corrections'] > 0:
+            console.print(
+                f"[cyan]🔧 Applied {stats['foreign_content_corrections']} foreign content corrections[/cyan]"
+            )
+        if stats['contextual_adaptations'] > 0:
+            console.print(
+                f"[cyan]📖 Applied {stats['contextual_adaptations']} contextual adaptations[/cyan]"
+            )
+        if stats['smart_retries'] > 0:
+            console.print(
+                f"[yellow]🔁 Smart retries: {stats['smart_retries']} "
+                f"(split:{stats['split_recoveries']}, "
+                f"rephrase:{stats['rephrasing_recoveries']})[/yellow]"
+            )
+        console.print(
+            f"[blue]📚 Saved {len(system.translation_engine.terminology_database)} terms to database[/blue]"
+        )
+        console.print(
+            f"[magenta]⭐ Average quality score: "
+            f"{stats['average_quality_score']:.2f}/10[/magenta]"
+        )
+
     except KeyboardInterrupt:
-        print("\n⏹️ Process stopped by user")
-        print("💾 Saved data can be resumed later")
-        
+        console.print("\n[yellow]⏹️ Process stopped by user. Progress has been saved.[/yellow]")
+
     except Exception as e:
-        print(f"\n❌ Unexpected fatal error: {str(e)}")
-        logger.error(f"Error in main: {str(e)}")
+        console.print(f"\n[bold red]❌ Unexpected fatal error:[/bold red] {e}")
+        logger.error(f"Error in main: {e}")
         logger.error(traceback.format_exc())
+        sys.exit(1)
 
     finally:
-        # تنظيف موارد الشبكة لتجنب "Unclosed client session"
+        # تنظيف موارد الشبكة — محمي في حال فشل إنشاء النظام
         try:
-            await system.api_manager.cleanup()
-            logger.info("Network resources cleaned up successfully.")
+            if 'system' in dir() and hasattr(system, 'api_manager'):
+                await system.api_manager.cleanup()
+                logger.info("Network resources cleaned up successfully.")
         except Exception:
             pass
 
