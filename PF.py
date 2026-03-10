@@ -828,16 +828,14 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyCoKRKqxBAW5kjeVR5sVXa8",
-            "AIzaSyBOg7Fcc9qum6HzqgVXj2_7CRg",
-            "AIzaSyCq96pXxveGaUl2zfu8ms",
-            "AIzaSyAQEIPnASJKmG22jLfgt6gTpQ",
-            "AIzaSyDcE4H4B5Jzy3irwfrVIZg",
-            "AIzaSyAiHCZHptFnQioO-guNC0",
+            "AIzaSyCq96pXxveGaUl2zfu8Lms",
+            "AIzaSyAQEIPnASJKmG22jLfgt6gpQ",
+            "AIzaSyDcE4H4B5Jzy3irwfrVIQx7Zg",
+            "AIzaSyAiHCZHptFnQioO-guNyxdC0",
             "AIzaSyBWoJ1JToWqsvRGqLUJfR1yU",
-            "AIzaSyAUcgeEdeu5EB3lhfYDGdk_A",
-            "AIzaSyDyScB6V94og6ypaaQ6Sj3A",
-            "AIzaSyCEK4C8TkEYftcj9OEoprFaM",
+            "AIzaSyAUcgeEdeu5EB3lhfYDp_A",
+            "AIzaSyDyScB6V94og6ypaaQ6Sj2BA",
+            "AIzaSyCEK4C8TkEYftcj9OEopzM",
             
 
         ]
@@ -3589,269 +3587,524 @@ class ProfessionalDocumentProcessor:
 
 
 class EnhancedDocumentGenerator:
-    """مولد المستندات المحسن للروايات مع الفهرس"""
-    
+    """
+    مولد المستندات المحسن للروايات.
+
+    التحسينات المُطبَّقة على الكلاس:
+      1. الفهرس من العناوين الحقيقية المستخرجة من PDF — لا تخمين.
+      2. كاشف نوع المقطع (_detect_paragraph_type) لتطبيق أنماط متعددة.
+      3. أنماط إضافية: DialogueLine, SceneBreak, EmbeddedPoem,
+         EmbeddedDocument, SubHeading — مع استبقاء كل الأنماط الأصلية.
+      4. إصلاح clean_novel_paragraph: حماية الحوارات والجمل الأدبية القصيرة.
+      5. verify_document: فحص شامل بعد الحفظ مع تقرير جودة كامل.
+      6. _setup_document_styles: استخراج إعداد الأنماط لدالة منفصلة.
+    """
+
+    # ── ثوابت أنواع المقاطع ──────────────────────────────────────────────
+    PARA_NORMAL        = 'normal'
+    PARA_DIALOGUE      = 'dialogue'
+    PARA_SCENE_BREAK   = 'scene_break'
+    PARA_EMBEDDED_POEM = 'embedded_poem'
+    PARA_EMBEDDED_DOC  = 'embedded_document'
+    PARA_SUBHEADING    = 'subheading'
+
+    # خريطة النوع → اسم النمط في python-docx
+    _PARA_STYLE_MAP = {
+        'normal':           'NovelText',
+        'dialogue':         'DialogueLine',
+        'scene_break':      'SceneBreak',
+        'embedded_poem':    'EmbeddedPoem',
+        'embedded_document':'EmbeddedDocument',
+        'subheading':       'SubHeading',
+    }
+
+    # بادئات تدل على حوار
+    _DIALOGUE_STARTERS = ('"', '\u201c', '\u201d', '\u00ab', '\u00bb', '\u2014', '\u2013', '-')
+    _DIALOGUE_VERBS    = (
+        'قال', 'قالت', 'أجاب', 'أجابت', 'صاح', 'صاحت',
+        'همس', 'همست', 'سأل', 'سألت', 'ردّ', 'ردّت', 'ردت',
+    )
+
+    # بادئات وثائق/رسائل مضمَّنة
+    _DOC_STARTERS = (
+        'عزيزي', 'عزيزتي', 'إلى:', 'من:', 'التاريخ:', 'الموضوع:',
+        'Dear', 'To:', 'From:', 'Date:', 'Subject:',
+    )
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  مساعد: فحص عربية النص
+    # ─────────────────────────────────────────────────────────────────────
+
     @staticmethod
-    async def create_table_of_contents(chapters: List[Dict[str, Any]], 
-                                     api_manager: EnhancedGeminiAPI) -> List[Dict[str, str]]:
-        """إنشاء فهرس منظم بدون تكرار وترجمة واحدة لكل عنوان"""
-        logger.info("Creating an organized table of contents without duplicates...")
-        
-        table_of_contents = []
-        processed_titles = set()  # لمنع التكرار
-        used_translations = set()  # لمنع تكرار الترجمات
-        
-        for i, chapter in enumerate(chapters):
+    def _is_arabic_text(text: str) -> bool:
+        """يُعيد True إذا كان أكثر من 30% من الأحرف في النص أحرفاً عربية."""
+        if not text:
+            return False
+        arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+        return arabic_chars / max(len(text), 1) > 0.30
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  كاشف نوع المقطع
+    # ─────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _detect_paragraph_type(cls, text: str) -> str:
+        """
+        يفحص نص الفقرة ويُعيد نوعها لاختيار النمط المناسب.
+
+        الأنواع المُعادة:
+          normal          — سرد عادي (الافتراضي الآمن)
+          dialogue        — حوار (بدء بعلامة اقتباس صريحة أو فعل قول)
+          scene_break     — فاصل مشهد (*** أو --- متجاورة بلا مسافات)
+          embedded_poem   — شعر مضمَّن (علامة ^ أو # في بداية السطر)
+          embedded_document — رسالة/وثيقة مضمَّنة
+          subheading      — عنوان فرعي (يبدأ بـ ## أو علامة صريحة)
+          empty           — فراغ
+
+        ملاحظة التصميم:
+          • SubHeading و EmbeddedPoem يتطلبان علامات صريحة فقط لمنع
+            التصنيف الخاطئ للجمل السردية القصيرة.
+          • أي نص لا تنطبق عليه شروط صريحة يُعامَل كـ normal.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return 'empty'
+
+        # ── فاصل مشهد: أحرف خاصة متجاورة فقط (بلا مسافات) ─────────
+        # يُكتشف قبل وصوله هنا من خلال detect_and_preserve_scene_breaks
+        if re.match(r'^[\*\-\~\_]{3,}$', stripped):
+            return cls.PARA_SCENE_BREAK
+
+        # ── وثيقة/رسالة مضمَّنة: بادئات صريحة ───────────────────────
+        if any(stripped.startswith(s) for s in cls._DOC_STARTERS):
+            return cls.PARA_EMBEDDED_DOC
+
+        # ── حوار: يبدأ بعلامة اقتباس صريحة أو فعل قول ──────────────
+        if any(stripped.startswith(s) for s in cls._DIALOGUE_STARTERS):
+            return cls.PARA_DIALOGUE
+        if any(stripped.startswith(v) for v in cls._DIALOGUE_VERBS):
+            return cls.PARA_DIALOGUE
+
+        # ── شعر مضمَّن: علامة ^ أو # في البداية (صريحة فقط) ─────────
+        if stripped.startswith('^') or stripped.startswith('# '):
+            return cls.PARA_EMBEDDED_POEM
+
+        # ── عنوان فرعي: علامة ## أو [عنوان] صريحة ───────────────────
+        if stripped.startswith('## ') or (stripped.startswith('[') and stripped.endswith(']')):
+            return cls.PARA_SUBHEADING
+
+        # ── سرد عادي: الافتراضي الآمن لجميع الحالات الأخرى ──────────
+        return cls.PARA_NORMAL
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  إعداد أنماط المستند (مستخرج لدالة مستقلة)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _setup_document_styles(doc: 'Document') -> None:
+        """
+        يُنشئ جميع الأنماط المخصصة في المستند إذا لم تكن موجودة بعد.
+
+        الأنماط الأصلية (محتفظ بها كما هي):
+          NovelTitle, ChapterTitle, NovelText, TOCTitle, TOCEntry
+
+        الأنماط الجديدة:
+          DialogueLine    — تمييز بصري للحوار
+          SceneBreak      — فاصل مشهد مُوسَّط
+          EmbeddedPoem    — شعر مضمَّن بخط مائل ومركزي
+          EmbeddedDocument — رسالة/وثيقة بمسافة بادئة مزدوجة
+          SubHeading      — عنوان فرعي داخل الفصل
+        """
+        styles = doc.styles
+
+        def _get_or_create(name: str):
+            """يُعيد النمط إذا وُجد، وإلا يُنشئه."""
+            if name in styles:
+                return styles[name]
+            return styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+
+        # ── النمط الأساسي ────────────────────────────────────────────
+        base = styles['Normal']
+        base.font.name  = 'Arial'
+        base.font.rtl   = True
+        base.font.size  = Pt(14)
+        base.paragraph_format.alignment         = WD_ALIGN_PARAGRAPH.JUSTIFY
+        base.paragraph_format.line_spacing      = 1.3
+        base.paragraph_format.space_after       = Pt(6)
+        base.paragraph_format.space_before      = Pt(0)
+        base.paragraph_format.first_line_indent = Inches(0.25)
+
+        # ── عنوان الرواية (NovelTitle) ───────────────────────────────
+        s = _get_or_create('NovelTitle')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(18)
+        s.font.bold = True
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.CENTER
+        s.paragraph_format.space_after  = Pt(10)
+        s.paragraph_format.space_before = Pt(0)
+
+        # ── عنوان الفصل (ChapterTitle) ───────────────────────────────
+        s = _get_or_create('ChapterTitle')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(15)
+        s.font.bold = True
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.CENTER
+        s.paragraph_format.space_before = Pt(12)
+        s.paragraph_format.space_after  = Pt(8)
+
+        # ── النص الأساسي (NovelText) ─────────────────────────────────
+        s = _get_or_create('NovelText')
+        s.base_style = styles['Normal']
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(14)
+        s.paragraph_format.alignment          = WD_ALIGN_PARAGRAPH.JUSTIFY
+        s.paragraph_format.line_spacing       = 1.25
+        s.paragraph_format.space_after        = Pt(4)
+        s.paragraph_format.space_before       = Pt(0)
+        s.paragraph_format.first_line_indent  = Inches(0.2)
+        s.paragraph_format.widow_control      = True
+        s.paragraph_format.keep_together      = False
+
+        # ── عنوان الفهرس (TOCTitle) ──────────────────────────────────
+        s = _get_or_create('TOCTitle')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(16)
+        s.font.bold = True
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.CENTER
+        s.paragraph_format.space_after  = Pt(15)
+        s.paragraph_format.space_before = Pt(0)
+
+        # ── عناصر الفهرس (TOCEntry) ──────────────────────────────────
+        s = _get_or_create('TOCEntry')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(13)
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.RIGHT
+        s.paragraph_format.space_after  = Pt(6)
+        s.paragraph_format.space_before = Pt(0)
+        s.paragraph_format.left_indent  = Inches(0.2)
+
+        # ── حوار (DialogueLine) — جديد ───────────────────────────────
+        s = _get_or_create('DialogueLine')
+        s.base_style = styles['NovelText']
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(14)
+        s.paragraph_format.alignment         = WD_ALIGN_PARAGRAPH.RIGHT
+        s.paragraph_format.line_spacing      = 1.25
+        s.paragraph_format.space_after       = Pt(3)
+        s.paragraph_format.space_before      = Pt(3)
+        s.paragraph_format.first_line_indent = Inches(0.3)
+        s.paragraph_format.left_indent       = Inches(0.1)
+        s.paragraph_format.widow_control     = True
+
+        # ── فاصل مشهد (SceneBreak) — جديد ───────────────────────────
+        s = _get_or_create('SceneBreak')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(12)
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.CENTER
+        s.paragraph_format.space_after  = Pt(12)
+        s.paragraph_format.space_before = Pt(12)
+
+        # ── شعر مضمَّن (EmbeddedPoem) — جديد ────────────────────────
+        s = _get_or_create('EmbeddedPoem')
+        s.font.name   = 'Arial';  s.font.rtl = True;  s.font.size = Pt(13)
+        s.font.italic = True
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.CENTER
+        s.paragraph_format.line_spacing = 1.5
+        s.paragraph_format.space_after  = Pt(6)
+        s.paragraph_format.space_before = Pt(6)
+
+        # ── وثيقة/رسالة مضمَّنة (EmbeddedDocument) — جديد ───────────
+        s = _get_or_create('EmbeddedDocument')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(12)
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.JUSTIFY
+        s.paragraph_format.line_spacing = 1.2
+        s.paragraph_format.space_after  = Pt(4)
+        s.paragraph_format.space_before = Pt(4)
+        s.paragraph_format.left_indent  = Inches(0.5)
+        s.paragraph_format.right_indent = Inches(0.5)
+
+        # ── عنوان فرعي (SubHeading) — جديد ──────────────────────────
+        s = _get_or_create('SubHeading')
+        s.font.name = 'Arial';  s.font.rtl = True;  s.font.size = Pt(14)
+        s.font.bold = True
+        s.paragraph_format.alignment    = WD_ALIGN_PARAGRAPH.CENTER
+        s.paragraph_format.space_before = Pt(8)
+        s.paragraph_format.space_after  = Pt(4)
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  بناء الفهرس من العناوين الحقيقية
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def create_table_of_contents(chapters: List[Dict[str, Any]],
+                                       api_manager: 'EnhancedGeminiAPI') -> List[Dict[str, str]]:
+        """
+        يبني الفهرس من العناوين الحقيقية المخزَّنة في بيانات الفصل
+        (المستخرجة من PDF في مرحلة الاستخراج) — لا حاجة لتخمين من المحتوى.
+
+        الأولوية لكل فصل:
+          1. chapter['arabic_title']  — عنوان مترجم مُخزَّن مسبقاً (أفضل)
+          2. chapter['title']         — العنوان الأصلي المستخرج:
+               • عربي → يُستخدم مباشرةً
+               • غير عربي وغير عام → يُترجم عبر API مرة واحدة فقط
+          3. "الفصل N"                — احتياطي أخير إذا فشل كل ما سبق
+
+        يضمن عدم تكرار أي عنوان في الفهرس.
+        """
+        logger.info("Building TOC from real extracted chapter titles (no content scanning)...")
+
+        table_of_contents: List[Dict[str, str]] = []
+        processed_original_titles: set = set()
+        used_arabic_titles: set = set()
+        fallback_counter = 1
+
+        # نمط العناوين العامة الداخلية (chapter_003, الجزء 5, ...)
+        _GENERIC_PATTERN = re.compile(
+            r'^(chapter|الجزء|part|section|فصل)\s*[\d]+\s*$|^chapter_\d+$',
+            re.IGNORECASE
+        )
+
+        for chapter in chapters:
             if not chapter.get('translated_content'):
                 continue
-                
-            original_title = chapter['title']
-            
-            # تجنب تكرار نفس العنوان الأصلي
-            if original_title in processed_titles:
+
+            original_title: str = chapter.get('title', '').strip()
+
+            # ── تجنب تكرار نفس العنوان الأصلي ───────────────────────
+            if original_title in processed_original_titles:
                 continue
-            
-            processed_titles.add(original_title)
-            
-            # البحث عن عنوان حقيقي في النص المترجم
-            lines = chapter['translated_content'].split('\n')[:10]  # أول 10 أسطر فقط
-            chapter_title_found = None
-            
-            for line in lines:
-                line = line.strip()
-                # البحث عن عنوان مناسب (ليس طويل جداً وليس قصير جداً)
-                if (len(line) > 5 and len(line) < 60 and 
-                    not line.startswith('في') and not line.startswith('كان') and
-                    not line.startswith('لقد') and not line.startswith('عندما')):
-                    # تجنب تكرار نفس الترجمة
-                    if line not in used_translations:
-                        chapter_title_found = line
-                        used_translations.add(line)
-                        break
-            
-            # إذا لم يتم العثور على عنوان مناسب، ترجم العنوان الأصلي
-            if not chapter_title_found:
-                if not original_title.startswith('الجزء') and not original_title.lower().startswith('chapter'):
-                    translation_prompt = f"""اترجم عنوان الفصل التالي إلى العربية بشكل مختصر ومميز:
+            processed_original_titles.add(original_title)
 
-{original_title}
+            arabic_title: Optional[str] = None
 
-عنوان مترجم مميز (٣-٨ كلمات فقط):"""
-                    
-                    translated_title_result = await api_manager.make_precision_request(
-                        translation_prompt,
-                        temperature=0.2,
-                        request_type="chapter_title_translation"
-                    )
-                    
-                    translated_title, _, _ = translated_title_result if translated_title_result else (None, 0.0, None)
+            # ── المصدر 1: عنوان مترجم مُخزَّن مسبقاً ────────────────
+            pre_translated = chapter.get('arabic_title', '').strip()
+            if pre_translated and EnhancedDocumentGenerator._is_arabic_text(pre_translated):
+                arabic_title = pre_translated[:60]
 
-                    if translated_title:
-                        clean_title = translated_title.strip()[:50]
-                        # تجنب تكرار نفس الترجمة
-                        if clean_title not in used_translations:
-                            arabic_title = clean_title
-                            used_translations.add(clean_title)
-                        else:
-                            arabic_title = f"الفصل {len(table_of_contents) + 1}"
+            # ── المصدر 2: العنوان الأصلي المستخرج ───────────────────
+            if not arabic_title and original_title:
+                is_generic = bool(_GENERIC_PATTERN.match(original_title))
+
+                if not is_generic:
+                    if EnhancedDocumentGenerator._is_arabic_text(original_title):
+                        # العنوان عربي أصلاً → استخدمه مباشرةً
+                        arabic_title = original_title[:60]
                     else:
-                        arabic_title = f"الفصل {len(table_of_contents) + 1}"
-                else:
-                    arabic_title = f"الفصل {len(table_of_contents) + 1}"
-            else:
-                arabic_title = chapter_title_found
-            
+                        # العنوان بلغة أخرى → ترجمه عبر API
+                        prompt = (
+                            f"اترجم عنوان الفصل التالي إلى العربية بشكل مختصر ومميز "
+                            f"(٣-٨ كلمات فقط):\n\n{original_title}\n\n"
+                            f"عنوان مترجم فقط (بدون شرح):"
+                        )
+                        try:
+                            result = await api_manager.make_precision_request(
+                                prompt,
+                                temperature=0.2,
+                                request_type="chapter_title_translation"
+                            )
+                            translated, _, _ = result if result else (None, 0.0, None)
+                            if translated:
+                                arabic_title = translated.strip()[:60]
+                        except Exception as e:
+                            logger.warning(
+                                f"Title translation failed for '{original_title}': {e}"
+                            )
+
+            # ── الاحتياطي الأخير ─────────────────────────────────────
+            if not arabic_title:
+                arabic_title = f"الفصل {fallback_counter}"
+
+            # ── ضمان فريد العنوان ────────────────────────────────────
+            if arabic_title in used_arabic_titles:
+                arabic_title = f"{arabic_title} ({fallback_counter})"
+            used_arabic_titles.add(arabic_title)
+            fallback_counter += 1
+
             table_of_contents.append({
                 'original_title': original_title,
-                'arabic_title': arabic_title
+                'arabic_title':   arabic_title,
             })
-        
-        logger.info(f"Created table of contents with {len(table_of_contents)} unique titles")
-        
+
+        real_titles = sum(
+            1 for e in table_of_contents
+            if not e['arabic_title'].startswith('الفصل')
+        )
+        logger.info(
+            f"TOC built: {len(table_of_contents)} entries "
+            f"({real_titles} with real names, "
+            f"{len(table_of_contents) - real_titles} fallback)"
+        )
         return table_of_contents
     
     @staticmethod
-    def create_novel_document(chapters: List[Dict[str, Any]], 
-                            output_path: str,
-                            book_title: str = "الرواية المترجمة",
-                            author: str = "مترجم بالذكاء الاصطناعي",
-                            table_of_contents: List[Dict[str, str]] = None) -> str:
-        """إنشاء مستند رواية احترافي مع فهرس في صفحة منفصلة وأحجام خط محددة"""
-        
-        logger.info(f"Creating novel document with separate TOC: {output_path}")
-        
-        try:
-            # إنشاء مجلد الإخراج إذا لم يكن موجوداً
-            output_dir = Path(output_path).parent
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            doc = Document()
-            
-            # إعداد الصفحة للرواية العربية - تحسين استغلال المساحة
-            section = doc.sections[0]
-            section.page_width = Inches(6)
-            section.page_height = Inches(9)
-            section.left_margin = Inches(0.7)    # تقليل الهامش قليلاً
-            section.right_margin = Inches(0.9)   # تقليل الهامش قليلاً
-            section.top_margin = Inches(0.8)     # تقليل الهامش العلوي
-            section.bottom_margin = Inches(0.8)  # تقليل الهامش السفلي
-            
-            # إعداد النمط الأساسي للعربية - استغلال أمثل للمساحة
-            style = doc.styles['Normal']
-            font = style.font
-            font.name = 'Arial'
-            font.rtl = True
-            font.size = Pt(14)  # حجم النص الأساسي 14pt
-            style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # محاذاة ضبط
-            style.paragraph_format.line_spacing = 1.3   # مسافة خط مثلى - لا كبيرة ولا صغيرة
-            style.paragraph_format.space_after = Pt(6)  # مسافة صغيرة بين الفقرات
-            style.paragraph_format.space_before = Pt(0) # بدون مسافة قبل الفقرة
-            style.paragraph_format.first_line_indent = Inches(0.25)  # بادئة مناسبة
+    def create_novel_document(chapters: List[Dict[str, Any]],
+                              output_path: str,
+                              book_title: str = "الرواية المترجمة",
+                              author: str = "مترجم بالذكاء الاصطناعي",
+                              table_of_contents: List[Dict[str, str]] = None) -> str:
+        """
+        ينشئ مستند DOCX احترافي للرواية مع:
+          • فهرس منفصل بعناوين حقيقية
+          • تنسيق ذكي لكل نوع فقرة (سرد/حوار/شعر/وثيقة/فاصل مشهد/عنوان فرعي)
+          • حماية المحتوى الأدبي القصير (الحوارات الدرامية)
+          • فحص شامل للمستند بعد الحفظ مع تقرير جودة في السجل
+        """
+        logger.info(f"Creating novel document with smart multi-style formatting: {output_path}")
 
-            # أنماط محسنة للرواية
-            styles = doc.styles
-            
-            # نمط عنوان الرواية - مضغوط ومناسب
-            if 'NovelTitle' not in styles:
-                novel_title_style = styles.add_style('NovelTitle', WD_STYLE_TYPE.PARAGRAPH)
-                novel_title_style.font.name = 'Arial'
-                novel_title_style.font.rtl = True
-                novel_title_style.font.size = Pt(18)  # حجم مناسب للعنوان الرئيسي
-                novel_title_style.font.bold = True
-                novel_title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                novel_title_style.paragraph_format.space_after = Pt(10)  # مسافة صغيرة
-                novel_title_style.paragraph_format.space_before = Pt(0)
-            
-            # نمط عنوان الفصل - حجم 15pt مع مساحات محسنة
-            if 'ChapterTitle' not in styles:
-                chapter_title_style = styles.add_style('ChapterTitle', WD_STYLE_TYPE.PARAGRAPH)
-                chapter_title_style.font.name = 'Arial'
-                chapter_title_style.font.rtl = True
-                chapter_title_style.font.size = Pt(15)  # حجم عناوين الفصول 15pt
-                chapter_title_style.font.bold = True
-                chapter_title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                chapter_title_style.paragraph_format.space_before = Pt(12)  # مسافة قبل العنوان
-                chapter_title_style.paragraph_format.space_after = Pt(8)    # مسافة بعد العنوان
-            
-            # نمط النص الأساسي - 14pt مع تحسين استغلال المساحة
-            if 'NovelText' not in styles:
-                novel_text_style = styles.add_style('NovelText', WD_STYLE_TYPE.PARAGRAPH)
-                novel_text_style.base_style = styles['Normal']
-                novel_text_style.font.name = 'Arial'
-                novel_text_style.font.rtl = True
-                novel_text_style.font.size = Pt(14)  # حجم النص الأساسي 14pt - موحد
-                novel_text_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # محاذاة ضبط
-                novel_text_style.paragraph_format.line_spacing = 1.25  # مسافة خط محسنة
-                novel_text_style.paragraph_format.space_after = Pt(4)   # مسافة صغيرة بين الفقرات
-                novel_text_style.paragraph_format.space_before = Pt(0)  # بدون مسافة قبل الفقرة
-                novel_text_style.paragraph_format.first_line_indent = Inches(0.2)  # بادئة صغيرة
-                novel_text_style.paragraph_format.widow_control = True   # منع الأسطر الوحيدة
-                novel_text_style.paragraph_format.keep_together = False  # السماح بتقسيم الفقرات
-            
-            # نمط الفهرس - عنوان الفهرس محسن
-            if 'TOCTitle' not in styles:
-                toc_title_style = styles.add_style('TOCTitle', WD_STYLE_TYPE.PARAGRAPH)
-                toc_title_style.font.name = 'Arial'
-                toc_title_style.font.rtl = True
-                toc_title_style.font.size = Pt(16)
-                toc_title_style.font.bold = True
-                toc_title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                toc_title_style.paragraph_format.space_after = Pt(15)  # مسافة محسنة
-                toc_title_style.paragraph_format.space_before = Pt(0)
-            
-            # نمط عناصر الفهرس - استغلال أمثل للمساحة
-            if 'TOCEntry' not in styles:
-                toc_entry_style = styles.add_style('TOCEntry', WD_STYLE_TYPE.PARAGRAPH)
-                toc_entry_style.font.name = 'Arial'
-                toc_entry_style.font.rtl = True
-                toc_entry_style.font.size = Pt(13)  # حجم مناسب لأسماء الفصول
-                toc_entry_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                toc_entry_style.paragraph_format.space_after = Pt(6)    # مسافة محسنة
-                toc_entry_style.paragraph_format.space_before = Pt(0)
-                toc_entry_style.paragraph_format.left_indent = Inches(0.2)  # مسافة بادئة صغيرة
-            
-            # صفحة العنوان
-            title_paragraph = doc.add_paragraph(book_title, style='NovelTitle')
-            
+        try:
+            # ── إعداد مجلد الإخراج ──────────────────────────────────
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+            doc = Document()
+
+            # ── إعداد الصفحة ─────────────────────────────────────────
+            section = doc.sections[0]
+            section.page_width    = Inches(6)
+            section.page_height   = Inches(9)
+            section.left_margin   = Inches(0.7)
+            section.right_margin  = Inches(0.9)
+            section.top_margin    = Inches(0.8)
+            section.bottom_margin = Inches(0.8)
+
+            # ── إنشاء جميع الأنماط (الأصلية + الجديدة) ───────────────
+            EnhancedDocumentGenerator._setup_document_styles(doc)
+
+            # ── صفحة العنوان ─────────────────────────────────────────
+            doc.add_paragraph(book_title, style='NovelTitle')
+
             if author and author != "مترجم بالذكاء الاصطناعي":
-                author_paragraph = doc.add_paragraph(author)
-                author_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                author_paragraph.runs[0].font.size = Pt(13)  # حجم مناسب لاسم المؤلف
-                author_paragraph.runs[0].font.rtl = True
-                author_paragraph.paragraph_format.space_after = Pt(5)  # مسافة صغيرة
-            
-            # انتقال لصفحة جديدة للفهرس
+                author_para = doc.add_paragraph(author)
+                author_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if author_para.runs:
+                    author_para.runs[0].font.size = Pt(13)
+                    author_para.runs[0].font.rtl  = True
+                author_para.paragraph_format.space_after = Pt(5)
+
             doc.add_page_break()
-            
-            # صفحة الفهرس المنفصلة - احترافية مثل الكتب الحقيقية
+
+            # ── صفحة الفهرس المنفصلة ─────────────────────────────────
             if table_of_contents:
                 doc.add_paragraph("فهرس المحتويات", style='TOCTitle')
-                
-                # مسافة إضافية قبل بداية الفهرس - محسنة
-                doc.add_paragraph().paragraph_format.space_after = Pt(8)
-                
-                # إضافة عناصر الفهرس بشكل احترافي - أسماء الفصول بالأحرف العربية
+                spacer = doc.add_paragraph()
+                spacer.paragraph_format.space_after = Pt(8)
+
                 for i, toc_entry in enumerate(table_of_contents, 1):
-                    # تحويل الرقم إلى كتابة عربية
                     chapter_number_text = ComprehensiveContentProcessor.number_to_arabic_text(i)
-                    
-                    # تنسيق احترافي: اسم الفصل بالأحرف العربية
                     toc_line = f"الفصل {chapter_number_text}: {toc_entry['arabic_title']}"
-                    toc_paragraph = doc.add_paragraph(toc_line, style='TOCEntry')
-                    
-                    # إضافة مسافة صغيرة بين الفصول للوضوح - محسنة
-                    toc_paragraph.paragraph_format.space_after = Pt(6)
-            
-            # انتقال لصفحة جديدة للمحتوى
+                    toc_para = doc.add_paragraph(toc_line, style='TOCEntry')
+                    toc_para.paragraph_format.space_after = Pt(6)
+
             doc.add_page_break()
-            
-            # محتوى الرواية النظيف بدون تكرار
-            used_chapter_titles = set()  # لمنع تكرار العناوين
-            
+
+            # ── بناء خريطة: original_title → arabic_title ────────────
+            toc_index_map: Dict[str, str] = {}
+            if table_of_contents:
+                for entry in table_of_contents:
+                    toc_index_map[entry['original_title']] = entry['arabic_title']
+
+            # ── محتوى الرواية ────────────────────────────────────────
+            used_chapter_titles: set = set()
+
             for i, chapter in enumerate(chapters):
                 if not chapter.get('translated_content'):
-                    logger.warning(f"تخطي الفصل غير المترجم: {chapter['title']}")
+                    logger.warning(f"Skipping untranslated chapter: {chapter.get('title', '?')}")
                     continue
-                
-                # استخدام عنوان فريد من الفهرس
-                chapter_title = None
-                if table_of_contents and i < len(table_of_contents):
-                    potential_title = table_of_contents[i]['arabic_title']
-                    # تجنب تكرار نفس العنوان
-                    if potential_title not in used_chapter_titles:
-                        chapter_title = potential_title
-                        used_chapter_titles.add(chapter_title)
-                
-                # إضافة عنوان الفصل مرة واحدة فقط إذا كان فريداً
+
+                # ── تحديد عنوان الفصل ────────────────────────────────
+                orig = chapter.get('title', '')
+                if orig in toc_index_map:
+                    candidate = toc_index_map[orig]
+                elif table_of_contents and i < len(table_of_contents):
+                    candidate = table_of_contents[i]['arabic_title']
+                else:
+                    candidate = f"الفصل {i + 1}"
+
+                # السماح بفصل بلا عنوان إذا كان مكرراً (بدلاً من إسقاطه)
+                chapter_title: Optional[str] = None
+                if candidate not in used_chapter_titles:
+                    chapter_title = candidate
+                    used_chapter_titles.add(chapter_title)
+
                 if chapter_title and not chapter_title.startswith('الجزء'):
                     doc.add_paragraph(chapter_title, style='ChapterTitle')
-                
-                # معالجة محتوى الفصل بشكل منتظم
-                content = chapter['translated_content']
-                
-                # تقسيم النص وتنظيفه
+
+                # ── فقرات الفصل بالتنسيق الذكي ───────────────────────
+                content    = chapter['translated_content']
                 paragraphs = content.split('\n\n')
-                
-                for para_text in paragraphs:
-                    para_text = para_text.strip()
-                    if para_text:
-                        # تنظيف النص من العناوين المكررة
-                        if chapter_title and chapter_title in para_text:
-                            para_text = para_text.replace(chapter_title, '').strip()
-                        
-                        clean_text = EnhancedDocumentGenerator.clean_novel_paragraph(para_text)
-                        if clean_text and len(clean_text) > 10:  # تجنب النصوص القصيرة
-                            doc.add_paragraph(clean_text, style='NovelText')
-            
-            # حفظ المستند
+
+                for raw_para in paragraphs:
+                    raw_para = raw_para.strip()
+                    if not raw_para:
+                        continue
+
+                    # إزالة العنوان المكرر من بداية الفقرة
+                    if chapter_title and chapter_title in raw_para:
+                        raw_para = raw_para.replace(chapter_title, '').strip()
+                    if not raw_para:
+                        continue
+
+                    # ── تنظيف مع حماية الأدب القصير ──────────────────
+                    clean_text = EnhancedDocumentGenerator.clean_novel_paragraph(raw_para)
+                    if not clean_text:
+                        continue
+
+                    # ── كشف النوع واختيار النمط المناسب ──────────────
+                    para_type  = EnhancedDocumentGenerator._detect_paragraph_type(clean_text)
+                    if para_type == 'empty':
+                        continue
+
+                    style_name = EnhancedDocumentGenerator._PARA_STYLE_MAP.get(
+                        para_type, 'NovelText'
+                    )
+
+                    doc.add_paragraph(clean_text, style=style_name)
+
+            # ── حفظ المستند ──────────────────────────────────────────
             doc.save(output_path)
-            
-            logger.info(f"Novel document created successfully with enhanced professional formatting: {output_path}")
-            logger.info(f"Font sizes: Body text 14pt, Titles 15pt")
-            logger.info(f"TOC: Professional with Arabic numerals")
-            logger.info(f"Formatting: Optimal space utilization like printed novels")
+            logger.info(f"Novel document saved: {output_path}")
+            logger.info("Font sizes: Body 14pt, Titles 15pt | TOC: Arabic numerals")
+
+            # ── فحص ما بعد الإنشاء ───────────────────────────────────
+            # عدد الفصول المتوقع في المستند = فصول مترجمة بعناوين فريدة
+            # لا تبدأ بـ "الجزء" (وهي المستثناة من الكتابة في المستند)
+            seen_titles: set = set()
+            expected_chapters_in_doc = 0
+            for ch in chapters:
+                if not ch.get('translated_content'):
+                    continue
+                orig = ch.get('title', '')
+                toc_title = toc_index_map.get(orig, '')
+                if not toc_title and table_of_contents:
+                    idx = next(
+                        (i for i, c in enumerate(chapters) if c is ch), -1
+                    )
+                    toc_title = (table_of_contents[idx]['arabic_title']
+                                 if 0 <= idx < len(table_of_contents) else f"الفصل {idx+1}")
+                if toc_title and toc_title not in seen_titles and not toc_title.startswith('الجزء'):
+                    seen_titles.add(toc_title)
+                    expected_chapters_in_doc += 1
+            expected_toc   = len(table_of_contents) if table_of_contents else 0
+
+            verification = EnhancedDocumentGenerator.verify_document(
+                output_path, expected_chapters_in_doc, expected_toc
+            )
+
+            if verification['passed']:
+                logger.info(
+                    f"✅ Post-creation verification PASSED | "
+                    f"Paragraphs: {verification['stats'].get('non_empty_paragraphs', 0)} | "
+                    f"Words: {verification['stats'].get('total_words', 0):,} | "
+                    f"Size: {verification['stats'].get('file_size_bytes', 0):,} bytes"
+                )
+            else:
+                logger.warning("⚠️ Post-creation verification found issues:")
+                for w in verification.get('warnings', []):
+                    logger.warning(f"   • {w}")
+
+            quality_logger.info(
+                "Document verification report",
+                passed   = verification['passed'],
+                checks   = verification['checks'],
+                stats    = verification['stats'],
+                warnings = verification.get('warnings', []),
+            )
+
             return output_path
-            
+
         except Exception as e:
             logger.error(f"Error creating novel document: {str(e)}")
             logger.error(traceback.format_exc())
@@ -3859,39 +4112,216 @@ class EnhancedDocumentGenerator:
     
     @staticmethod
     def clean_novel_paragraph(text: str) -> str:
-        """تنظيف شامل للفقرة مع إزالة التكرار والعناصر غير المرغوبة"""
-        
-        # إزالة الأرقام في بداية الفقرات
-        text = re.sub(r'^\d+[\.\-\s]*', '', text)
-        
-        # إزالة أرقام الصفحات
-        text = re.sub(r'^\s*\d+\s*$', '', text)
-        
-        # إزالة الرموز والفواصل غير المرغوبة
-        text = re.sub(r'^[•\-\*\.\:\;]\s*', '', text)
-        
-        # إزالة الكلمات المكررة في نفس السطر
+        """
+        تنظيف الفقرة مع حماية المحتوى الأدبي القصير ذي الثقل الدرامي.
+
+        محمي (لا يُحذف):
+          • فواصل المشاهد (*** أو --- أو ~~~) — تُُحفظ وتُوحَّد كـ "***"
+          • جمل الحوار القصيرة ("لا.", "نعم.", "قالت: كلا!", "صمت طويل.")
+          • أي نص قصير يحتوي أحرفاً عربية أو علامات اقتباس/حوار
+          • ALL CAPS عربي (يدل على صراخ أو تأكيد في الحوار)
+
+        محذوف:
+          • أرقام الصفحات المنفردة
+          • رموز بادئة بلا محتوى أدبي (•, *, :, ;) — مع استثناء فواصل المشاهد
+          • تكرار مباشر للكلمات المتجاورة
+          • نص لا يحتوي إلا على أرقام ورموز وفراغات
+          • ALL CAPS إنجليزي قصير (قد يكون عنواناً مكرراً)
+        """
+        if not text:
+            return ""
+
+        stripped = text.strip()
+
+        # ── حماية أولى: فاصل مشهد — يُحوَّل مباشرةً ولا يمر بالفلاتر ──
+        # يتعامل مع: *** أو --- أو ~~~ أو * * * (بمسافات)
+        if re.match(r'^[\*\-\~\_\s]{3,}$', stripped) and re.search(r'[\*\-\~\_]', stripped):
+            return '***'
+
+        text = stripped
+
+        # ── إزالة أرقام الصفحات المنفردة ────────────────────────────
+        text = re.sub(r'^\s*\d{1,4}\s*$', '', text, flags=re.MULTILINE)
+
+        # ── إزالة رموز زخرفية بادئة بلا محتوى (لا تمس الحوار) ───────
+        text = re.sub(r'^[•\*\.\:\;]\s+(?=\S)', '', text.strip())
+
+        # ── إزالة أرقام البداية المتصلة بلا نص إضافي ────────────────
+        text = re.sub(r'^\d+[\.\-\s]+(?=[^\d])', '', text)
+
+        # ── إزالة التكرار المباشر للكلمات المتجاورة ─────────────────
         words = text.split()
         if len(words) > 1:
-            # إزالة التكرار المباشر
-            clean_words = []
-            for i, word in enumerate(words):
-                if i == 0 or word != words[i-1]:
-                    clean_words.append(word)
+            clean_words = [words[0]]
+            for w in words[1:]:
+                if w != clean_words[-1]:
+                    clean_words.append(w)
             text = ' '.join(clean_words)
-        
-        # تنظيف المسافات
-        text = re.sub(r'\s+', ' ', text)
-        
-        # إزالة الفقرات القصيرة جداً أو التي تحتوي رموز فقط
-        if len(text.strip()) < 20 or re.match(r'^[\d\s\-\*•\.\:\;]+$', text.strip()):
+
+        # ── تنظيف المسافات الزائدة ───────────────────────────────────
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        if not text:
             return ""
-        
-        # إزالة الفقرات التي هي مجرد عناوين مكررة
-        if text.strip().isupper() and len(text.strip()) < 50:
+
+        # ── فحص: نص رموز وأرقام فقط ← يُحذف ────────────────────────
+        if re.match(r'^[\d\s\-\*•\.\:\;،]+$', text):
             return ""
-        
-        return text.strip()
+
+        # ── حماية المحتوى الأدبي القصير (< 20 حرف) ──────────────────
+        if len(text) < 20:
+            has_arabic        = any('\u0600' <= c <= '\u06FF' for c in text)
+            has_dialogue_mark = any(c in ('"', '\u201c', '\u201d', '\u00ab', '\u00bb',
+                                          '\u2014', '\u2013') for c in text)
+            # أبقِه إذا كان يحمل معنى أدبياً (عربي أو علامة حوار)
+            if has_arabic or has_dialogue_mark:
+                return text
+            return ""
+
+        # ── ALL CAPS: فرّق بين العربي (صراخ/تأكيد) والإنجليزي ───────
+        if text.isupper() and len(text) < 50:
+            has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+            if has_arabic:
+                return text   # صراخ أو تأكيد في حوار → محفوظ
+            return ""         # أحرف إنجليزية كبيرة فقط → عنوان مكرر → يُحذف
+
+        return text
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  فحص المستند بعد الإنشاء
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def verify_document(output_path: str,
+                        expected_chapters: int,
+                        expected_toc_entries: int) -> Dict[str, Any]:
+        """
+        فحص شامل للمستند بعد حفظه وإعادة تقرير جودة كامل.
+
+        الفحوصات:
+          ✓ الملف موجود
+          ✓ حجم الملف > 10KB
+          ✓ الملف قابل للفتح بـ python-docx
+          ✓ يحتوي على فقرات غير فارغة
+          ✓ عدد عناوين الفصول يطابق المتوقع
+          ✓ عدد عناصر الفهرس يطابق المتوقع
+          ✓ لا يوجد فصلان بعناوين متتالية بلا محتوى بينهما
+
+        يُعيد:
+          {
+            'passed': bool,          ← True إذا نجحت الفحوصات الأساسية
+            'checks': {key: bool},   ← نتيجة كل فحص
+            'warnings': [str],       ← تحذيرات تفصيلية
+            'stats': {key: value},   ← إحصائيات المستند
+          }
+        """
+        report: Dict[str, Any] = {
+            'passed':   False,
+            'checks':   {},
+            'warnings': [],
+            'stats':    {},
+        }
+
+        file_path = Path(output_path)
+
+        # ── فحص 1: الملف موجود ──────────────────────────────────────
+        report['checks']['file_exists'] = file_path.exists()
+        if not file_path.exists():
+            report['warnings'].append(f"الملف غير موجود: {output_path}")
+            return report
+
+        # ── فحص 2: الحجم معقول (> 10KB) ────────────────────────────
+        file_size = file_path.stat().st_size
+        report['stats']['file_size_bytes'] = file_size
+        size_ok = file_size > 10_240
+        report['checks']['file_size_ok'] = size_ok
+        if not size_ok:
+            report['warnings'].append(
+                f"حجم الملف صغير جداً: {file_size:,} بايت (الحد الأدنى 10KB)"
+            )
+
+        # ── فحص 3: الملف قابل للفتح ─────────────────────────────────
+        try:
+            verify_doc = Document(output_path)
+            report['checks']['file_readable'] = True
+
+            all_paragraphs  = verify_doc.paragraphs
+            non_empty_paras = [p for p in all_paragraphs if p.text.strip()]
+            total_words     = sum(len(p.text.split()) for p in non_empty_paras)
+
+            report['stats']['total_paragraphs']     = len(all_paragraphs)
+            report['stats']['non_empty_paragraphs'] = len(non_empty_paras)
+            report['stats']['total_words']          = total_words
+
+            # ── فحص 4: يحتوي فقرات ──────────────────────────────────
+            paras_ok = len(non_empty_paras) > 0
+            report['checks']['paragraphs_ok'] = paras_ok
+            if not paras_ok:
+                report['warnings'].append("المستند لا يحتوي على أي فقرات غير فارغة!")
+
+            # ── فحص 5: عدد عناوين الفصول ────────────────────────────
+            chapter_titles = [
+                p for p in all_paragraphs
+                if p.style.name == 'ChapterTitle' and p.text.strip()
+            ]
+            actual_chapters = len(chapter_titles)
+            report['stats']['actual_chapters_in_doc'] = actual_chapters
+            ch_ok = (actual_chapters == expected_chapters)
+            report['checks']['chapter_count_ok'] = ch_ok
+            if not ch_ok:
+                report['warnings'].append(
+                    f"عناوين الفصول في المستند ({actual_chapters}) "
+                    f"≠ المتوقع ({expected_chapters})"
+                )
+
+            # ── فحص 6: عدد عناصر الفهرس ─────────────────────────────
+            toc_entries = [
+                p for p in all_paragraphs
+                if p.style.name == 'TOCEntry' and p.text.strip()
+            ]
+            actual_toc = len(toc_entries)
+            report['stats']['actual_toc_entries'] = actual_toc
+            toc_ok = (actual_toc == expected_toc_entries)
+            report['checks']['toc_count_ok'] = toc_ok
+            if not toc_ok:
+                report['warnings'].append(
+                    f"عناصر الفهرس في المستند ({actual_toc}) "
+                    f"≠ المتوقع ({expected_toc_entries})"
+                )
+
+            # ── فحص 7: لا فصول بلا محتوى (عناوين متتالية) ───────────
+            empty_chapters = sum(
+                1 for idx in range(len(all_paragraphs) - 1)
+                if (all_paragraphs[idx].style.name == 'ChapterTitle' and
+                    all_paragraphs[idx + 1].style.name == 'ChapterTitle')
+            )
+            report['stats']['chapters_without_content'] = empty_chapters
+            report['checks']['no_empty_chapters'] = (empty_chapters == 0)
+            if empty_chapters > 0:
+                report['warnings'].append(
+                    f"{empty_chapters} فصل بلا محتوى (عناوين ChapterTitle متتالية)"
+                )
+
+            # ── فحص 8: لا عناوين فهرس مكررة ─────────────────────────
+            toc_texts  = [p.text.strip() for p in toc_entries]
+            duplicates = len(toc_texts) - len(set(toc_texts))
+            report['stats']['duplicate_toc_entries'] = duplicates
+            report['checks']['no_duplicate_toc'] = (duplicates == 0)
+            if duplicates > 0:
+                report['warnings'].append(
+                    f"{duplicates} عنوان مكرر في الفهرس"
+                )
+
+        except Exception as e:
+            report['checks']['file_readable'] = False
+            report['warnings'].append(f"خطأ في فتح المستند: {str(e)}")
+            return report
+
+        # ── الحكم النهائي (الفحوصات الأساسية فقط) ───────────────────
+        critical = ['file_exists', 'file_size_ok', 'file_readable', 'paragraphs_ok']
+        report['passed'] = all(report['checks'].get(c, False) for c in critical)
+
+        return report
 
 
 class MasterTranslationSystem:
