@@ -188,9 +188,9 @@ _RATE_LIMITER_CONFIG_PATH = Path("rate_limiter_config.json")
 
 _RATE_LIMITER_DEFAULT_CONFIG = {
     "default": {
-        "max_rpm": 2,
+        "max_rpm": 5,
         "max_tpm": 32000,
-        "max_rpd": 50
+        "max_rpd": 25
     },
     "adaptive": {
         "enabled": True,
@@ -209,7 +209,7 @@ def _load_rate_limiter_config() -> dict:
     إذا لم يوجد الملف، يتم إنشاؤه بالإعدادات الافتراضية تلقائياً.
     البنية:
       {
-        "default": { "max_rpm": 2, "max_tpm": 32000, "max_rpd": 50 },
+        "default": { "max_rpm": 5, "max_tpm": 32000, "max_rpd": 25 },
         "adaptive": { "enabled": true, ... },
         "keys": {
           "AIzaSy...": { "max_rpm": 5, "max_tpm": 60000, "max_rpd": 100 }
@@ -251,7 +251,7 @@ class TokenRateLimiter:
         في الساعات ذات الضغط العالي ثم يعود تدريجياً للحد الطبيعي
     """
 
-    def __init__(self, max_rpm: int = 2, max_tpm: int = 32000, max_rpd: int = 50,
+    def __init__(self, max_rpm: int = 5, max_tpm: int = 32000, max_rpd: int = 25,
                  key_id: Optional[str] = None):
         """
         Args:
@@ -832,27 +832,7 @@ class EnhancedGeminiAPI:
     def __init__(self, api_keys: List[str] = None):
         # المفاتيح كما كانت في الكود الأصلي
         self.api_keys = [
-            "AIzaSyCoKRKqxBAW5kjeVR5sVXRlXjPBaa8",
-            "AIzaSyA9HAxV5Q-3MSnZJqFHHkb1GZ8ie_TI",
-            "AIzaSyBOg7Fcc9qum6HzqgVXj2_O-tQ0Rg",
-            "AIzaSyBzy_wBqit3gMz7v2D20TJ1ryvGIUA",
-            "AIzaSyCKzsBGWQq0fp4s4wMMd9XSL2ZQ",
-            "AIzaSyCkvbUfj-Ck3QWJ88CspKsvl1huPc",
-            "AIzaSyDnX2eJMKnYdjPsSwJXYLCjbCY",
-            "AIzaSyBWoHwS0Wj-dXctJXM_-yqe7vKaQ",
-            "AIzaSyAt-nTf7PWe8rC4ju8d4G50sQ4aLI",
-            "AIzaSyB15sEBm7hrtLWpgBZjxZX5avc8",
-            "AIzaSyAKHuaG7vUXygPxRaOcsr_ndJFyvuk",
-            "AIzaSyBfuBcZETDNN6xvqs3xoYUox9W8E",
-            "AIzaSyBOg7Fcc9qum6HzqgVXj2RRO-tQ0Rg",
-            "AIzaSyCq96pXxveGaUl2zfu8L_AMlXAe19Zms",
-            "AIzaSyAQEIPnASJKmG22jLfYlc1Q4C7pQ",
-            "AIzaSyDcE4H4B5Jzy3irwfrM8u-ZTVM0Zg",
-            "AIzaSyAiHCZHptFnQioO-guNyC0",
-            "AIzaSyBWoJ1JToWqsvRGqLyU",
-            "AIzaSyAUcgeEdeu5EB3lhfYDG_A",
-            "AIzaSyDyScB6V94og6ypaaQ63A",
-            "AIzaSyCEK4C8TkEYftcj9OEopaM",
+            "AIzaSyA9HAxV5Q-3MSkb1GZVy28ie_TI",
             
 
         ]
@@ -862,7 +842,7 @@ class EnhancedGeminiAPI:
         
         # Rate limiters لكل مفتاح - إعدادات قابلة للتهيئة من ملف خارجي
         self.rate_limiters = {
-            key: TokenRateLimiter(max_rpm=2, max_tpm=32000, max_rpd=50, key_id=key)
+            key: TokenRateLimiter(max_rpm=5, max_tpm=32000, max_rpd=25, key_id=key)
             for key in self.api_keys
         }
         
@@ -877,8 +857,10 @@ class EnhancedGeminiAPI:
 
         # إعدادات الAPI لـ Gemini 2.5 Flash
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
-        self.max_retries = 6
-        self.retry_delays = [3, 6, 12, 24, 48, 96]
+        self.max_retries = 3
+        # gemini-2.5-pro free tier: نافذة RPM = 60 ثانية
+        # يجب الانتظار 60+ ثانية بعد كل 429 حتى تنتهي النافذة الحالية
+        self.retry_delays = [65, 90, 120]
         
         # Connection pool للأداء الأفضل
         self.connector = None
@@ -1025,13 +1007,14 @@ class EnhancedGeminiAPI:
                 continue
             
             # إذا فشلت كل المحاولات، أعد تعيين المفاتيح المحظورة وانتظر
-            logger.warning("All keys are blocked, waiting...")
-            await asyncio.sleep(15)
+            # انتظار نافذة RPM الكاملة (60 ثانية) ثم إعادة المحاولة
+            logger.warning("All keys are blocked, waiting for RPM window to reset (65s)...")
+            await asyncio.sleep(65)
             self.blocked_keys.clear()
             # Loop will continue
     
     async def make_precision_request(self, prompt: str, system_instruction: str = "", 
-                                   temperature: float = 0.05, max_tokens: int = 16384,
+                                   temperature: float = 0.05, max_tokens: int = 8192,
                                    request_type: str = "translation") -> Tuple[Optional[str], float, Optional[str]]:
         """
         إرسال طلب دقيق مع تحسينات شاملة:
@@ -1044,11 +1027,10 @@ class EnhancedGeminiAPI:
         await self._ensure_session()
 
         # --- حساب التوكنز وإعداد maxOutputTokens ---
-        # نستخدم max_tokens كاملاً دائماً (8192).
-        # المعادلة القديمة (1.5 × input) كانت تُقلّص الإخراج خطأ:
-        # فصل 5000 كلمة → ~7500 توكن إدخال → يُحدَّد الإخراج بـ 8192 فقط
-        # لكن ترجمته العربية تحتاج 9000-12000 → النموذج يتوقف في المنتصف (MAX_TOKENS).
-        dynamic_max_tokens = max_tokens  # 8192 دائماً، لا تقليص بناءً على الإدخال
+        # gemini-2.5-pro free tier: max 32,000 TPM per key
+        # 800-word chunk ≈ 1200 input tokens + 8192 max output = ~9392 total per request
+        # نستخدم max_tokens كاملاً — النموذج يتوقف عند الانتهاء الطبيعي قبل الحد
+        dynamic_max_tokens = max_tokens  # 8192 — يحترم حصة TPM الحرة
         estimated_input_tokens = self.estimate_tokens(prompt + system_instruction)
         estimated_output_tokens = dynamic_max_tokens
         total_estimated_tokens  = estimated_input_tokens + estimated_output_tokens
@@ -1712,8 +1694,11 @@ class CompleteTranslationEngine:
     ⑥ استخراج المصطلحات ضمن الترجمة نفسها (لا API call منفصل)
     """
 
-    # ── حجم القطعة الآمن ──
-    SAFE_CHUNK_WORDS: int = 1800
+    # ── حجم القطعة الآمن — مُحسَّن لـ gemini-2.5-pro free tier ──
+    # gemini-2.5-pro: RPM=5, TPM=32000, RPD=25
+    # 800 كلمة ≈ 1200 توكن إدخال + ~3000 توكن إخراج = ~4200 توكن/طلب
+    # 32000 TPM ÷ 4200 ≈ 7 طلب/دقيقة — ضمن حد الـ RPM=5 بأمان
+    SAFE_CHUNK_WORDS: int = 800
 
     def __init__(self, api_manager: EnhancedGeminiAPI, target_language: str = "Arabic"):
         self.api_manager = api_manager
